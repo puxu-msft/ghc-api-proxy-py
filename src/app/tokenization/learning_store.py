@@ -7,10 +7,11 @@ import json
 import math
 import sqlite3
 import time
-from collections import defaultdict
+from collections import defaultdict, deque
 from collections.abc import Awaitable, Callable, Iterable, Mapping
 from dataclasses import dataclass, replace
 from enum import StrEnum
+from functools import partial
 from pathlib import Path
 from typing import Any, Protocol, TypeVar, cast
 
@@ -339,8 +340,9 @@ class UnresolvedLearningIdentity:
 
 @dataclass(frozen=True, slots=True)
 class _StoreLimits:
-    samples_per_identity: int = 4_096
-    samples_global: int = 32_768
+    # Sized to the whole-state read every startup, refresh and transaction performs; see spec §8.5.
+    samples_per_identity: int = 256
+    samples_global: int = 512
     actuals_per_fingerprint: int = 5
     evaluations_per_window: int = 128
     events_per_identity: int = 4_096
@@ -593,6 +595,8 @@ class TokenLearningStore:
         self._physical_close_task: asyncio.Task[None] | None = None
         self._validated_state = _empty_persistent_state()
         self._cache: dict[_IdentityKey, LearningSnapshot] = {}
+        # Decoded samples from the previous read, keyed by their full stored values; never mutated once assigned, so reads on other threads can share it.
+        self._sample_decode_memo: Mapping[tuple[_Row, LearningIdentity], _PersistentSample] = {}
         self._reader_data_version: int | None = None
         self._last_refresh_error: Exception | None = None
         self._created_schema = False
@@ -1514,6 +1518,7 @@ class TokenLearningStore:
             empty = not objects
             if objects:
                 await self._validate_schema(connection)
+                # Over the prunable caps alone is not invalid: the writer prunes it back in the migration transaction (spec §8.3).
                 await self._read_all_state(connection)
             commit_cancelled = await self._commit(
                 connection,
@@ -1607,6 +1612,8 @@ class TokenLearningStore:
                     )
                 await self._validate_schema(connection)
                 state = await self._read_all_state(connection)
+                if await self._prune_to_limits_locked(connection, state):
+                    state = await self._read_all_state(connection, enforce_prunable_bounds=True)
                 commit_cancelled = await self._commit(
                     connection,
                     action_id="tx.migration.commit",
@@ -1911,6 +1918,7 @@ class TokenLearningStore:
         connection: aiosqlite.Connection,
         *,
         enforce_bounds: bool = True,
+        enforce_prunable_bounds: bool = False,
     ) -> ValidatedPersistentState:
         meta = await self._fetchall_sql(
             connection,
@@ -1976,9 +1984,15 @@ class TokenLearningStore:
             prefix_checkpoints=prefix_checkpoints,
             events=events,
         )
+        memo_out: dict[tuple[_Row, LearningIdentity], _PersistentSample] = {}
         try:
-            return await self._run_cpu(
-                _decode_persistent_state,
+            state = await self._run_cpu(
+                partial(
+                    _decode_persistent_state,
+                    enforce_prunable_bounds=enforce_prunable_bounds,
+                    sample_memo=self._sample_decode_memo,
+                    sample_memo_out=memo_out,
+                ),
                 rows,
                 self._limits,
                 enforce_bounds,
@@ -1991,6 +2005,8 @@ class TokenLearningStore:
             raise LearningStoreStartupError(
                 LearningStoreStartupReason.INVALID_STATE
             ) from error
+        self._sample_decode_memo = memo_out
+        return state
 
     async def _read_data_version(self, connection: aiosqlite.Connection) -> int:
         row = await self._fetchone_sql(
@@ -2251,7 +2267,7 @@ class TokenLearningStore:
             )
             await self._delete_event_ids(writer, event_victim_ids)
             await self._delete_empty_metadata(writer)
-            final_state = await self._read_all_state(writer)
+            final_state = await self._read_all_state(writer, enforce_prunable_bounds=True)
             final_snapshot = final_state.snapshot(prepared.update.sample.identity)
             final_result = LearningApplyResult(
                 observation=final_observation,
@@ -3273,6 +3289,38 @@ class TokenLearningStore:
                     raise
                 await self._busy_sleep(deadline)
 
+    async def _prune_to_limits_locked(
+        self,
+        connection: aiosqlite.Connection,
+        state: ValidatedPersistentState,
+    ) -> bool:
+        """Delete what exceeds the prunable caps inside the caller's transaction; report whether anything went."""
+        plan = _compute_prune_plan(state, self._limits)
+        event_victim_ids = _compute_event_victim_ids(
+            state.events,
+            self._limits,
+            new_bucket=None,
+        )
+        if not (plan.sample_owners or plan.evaluation_keys or event_victim_ids):
+            return False
+        next_global = state.global_revision + 1
+        affected = set(plan.affected_identity_ids)
+        affected.update(
+            event.identity_id
+            for event in state.events
+            if event.event_id in event_victim_ids
+            and event.identity_id is not None
+        )
+        await self._increment_revisions_before_delete(
+            connection,
+            affected,
+            next_global,
+        )
+        await self._apply_prune_plan(connection, plan)
+        await self._delete_event_ids(connection, event_victim_ids)
+        await self._delete_empty_metadata(connection)
+        return True
+
     async def _prune_once(self) -> None:
         writer = self._require_writer()
         began = False
@@ -3288,30 +3336,8 @@ class TokenLearningStore:
                 writer,
                 enforce_bounds=False,
             )
-            plan = _compute_prune_plan(state, self._limits)
-            event_victim_ids = _compute_event_victim_ids(
-                state.events,
-                self._limits,
-                new_bucket=None,
-            )
-            if plan.sample_owners or plan.evaluation_keys or event_victim_ids:
-                next_global = state.global_revision + 1
-                affected = set(plan.affected_identity_ids)
-                affected.update(
-                    event.identity_id
-                    for event in state.events
-                    if event.event_id in event_victim_ids
-                    and event.identity_id is not None
-                )
-                await self._increment_revisions_before_delete(
-                    writer,
-                    affected,
-                    next_global,
-                )
-                await self._apply_prune_plan(writer, plan)
-                await self._delete_event_ids(writer, event_victim_ids)
-                await self._delete_empty_metadata(writer)
-            final_state = await self._read_all_state(writer)
+            await self._prune_to_limits_locked(writer, state)
+            final_state = await self._read_all_state(writer, enforce_prunable_bounds=True)
             commit_cancelled = await self._commit(
                 writer,
                 action_id="tx.prune.commit",
@@ -3601,6 +3627,10 @@ def _decode_persistent_state(
     rows: _AllRows,
     limits: _StoreLimits,
     enforce_bounds: bool,
+    *,
+    enforce_prunable_bounds: bool = False,
+    sample_memo: Mapping[tuple[_Row, LearningIdentity], _PersistentSample] | None = None,
+    sample_memo_out: dict[tuple[_Row, LearningIdentity], _PersistentSample] | None = None,
 ) -> ValidatedPersistentState:
     if len(rows.meta) != 1 or rows.meta[0][:3] != (
         1,
@@ -3621,7 +3651,8 @@ def _decode_persistent_state(
         if (identity.identity_id, identity.identity.learning_epoch) not in epoch_keys:
             raise ValueError("active identity epoch is absent")
     samples = tuple(
-        _decode_sample(row, identity_by_id, epoch_keys) for row in rows.samples
+        _decode_sample(row, identity_by_id, epoch_keys, sample_memo, sample_memo_out)
+        for row in rows.samples
     )
     sample_by_owner = {sample.owner_key: sample for sample in samples}
     if len(sample_by_owner) != len(samples):
@@ -3683,6 +3714,7 @@ def _decode_persistent_state(
             prefix_checkpoints,
             events,
             limits,
+            prunable=enforce_prunable_bounds,
         )
     snapshots = tuple(
         (
@@ -3756,12 +3788,30 @@ def _decode_sample(
     row: _Row,
     identity_by_id: Mapping[int, _IdentityState],
     epoch_keys: set[tuple[int, int]],
+    memo: Mapping[tuple[_Row, LearningIdentity], _PersistentSample] | None = None,
+    memo_out: dict[tuple[_Row, LearningIdentity], _PersistentSample] | None = None,
 ) -> _PersistentSample:
     identity_id = _as_positive_int("sample identity_id", row[1])
     epoch = _as_nonnegative_int("sample epoch", row[2])
     if (identity_id, epoch) not in epoch_keys:
         raise ValueError("sample epoch owner is absent")
     identity_state = identity_by_id[identity_id]
+    # The whole row is the key: decode is a pure function of it and its owner identity, and a rolled-back insert can hand the same sample_id to a different row.
+    memo_key = (row, identity_state.identity)
+    decoded = memo.get(memo_key) if memo is not None else None
+    if decoded is None:
+        decoded = _decode_sample_row(row, identity_id, epoch, identity_state)
+    if memo_out is not None:
+        memo_out[memo_key] = decoded
+    return decoded
+
+
+def _decode_sample_row(
+    row: _Row,
+    identity_id: int,
+    epoch: int,
+    identity_state: _IdentityState,
+) -> _PersistentSample:
     identity = replace(identity_state.identity, learning_epoch=epoch)
     profile = _decode_profile(row[14])
     profile_json = _encode_json(_profile_payload(profile), "profile key")
@@ -4537,6 +4587,43 @@ def _validate_state_bounds(
     prefix_checkpoints: tuple[_PersistentPrefixCheckpoint, ...],
     events: tuple[_PersistentEvent, ...],
     limits: _StoreLimits,
+    *,
+    prunable: bool = True,
+) -> None:
+    # `prunable` covers the caps a writer restores by pruning (spec §8.3): only a transaction that has just pruned asserts them, since another process — an older release during a rolling restart — may legitimately have written past them. Prefix checkpoint caps are never pruned, so they are always enforced. Check order is unchanged from before the split.
+    if prunable:
+        _validate_sample_bounds(samples, evaluations, exact_anchors, limits)
+    active_epochs = {
+        (identity.identity_id, identity.identity.learning_epoch)
+        for identity in identities
+    }
+    active_checkpoints = tuple(
+        checkpoint
+        for checkpoint in prefix_checkpoints
+        if (checkpoint.identity_id, checkpoint.epoch) in active_epochs
+    )
+    if len(active_checkpoints) > limits.prefix_checkpoints_global:
+        raise ValueError("global prefix checkpoint bound is exceeded")
+    checkpoint_counts: dict[tuple[int, int], int] = defaultdict(int)
+    for checkpoint in active_checkpoints:
+        checkpoint_counts[(checkpoint.identity_id, checkpoint.epoch)] += 1
+    if any(
+        count > limits.prefix_checkpoints_per_identity
+        for count in checkpoint_counts.values()
+    ):
+        raise ValueError("per-identity prefix checkpoint bound is exceeded")
+    if prunable:
+        _validate_event_bounds(events, limits)
+    identity_ids = {identity.identity_id for identity in identities}
+    if any(sample.identity_id not in identity_ids for sample in samples):
+        raise ValueError("sample references unknown identity")
+
+
+def _validate_sample_bounds(
+    samples: tuple[_PersistentSample, ...],
+    evaluations: tuple[_PersistentEvaluation, ...],
+    exact_anchors: tuple[_PersistentExactAnchor, ...],
+    limits: _StoreLimits,
 ) -> None:
     if len(samples) > limits.samples_global:
         raise ValueError("global sample bound is exceeded")
@@ -4570,25 +4657,12 @@ def _validate_state_bounds(
         ] += 1
     if any(count > limits.evaluations_per_window for count in evaluation_counts.values()):
         raise ValueError("evaluation window bound is exceeded")
-    active_epochs = {
-        (identity.identity_id, identity.identity.learning_epoch)
-        for identity in identities
-    }
-    active_checkpoints = tuple(
-        checkpoint
-        for checkpoint in prefix_checkpoints
-        if (checkpoint.identity_id, checkpoint.epoch) in active_epochs
-    )
-    if len(active_checkpoints) > limits.prefix_checkpoints_global:
-        raise ValueError("global prefix checkpoint bound is exceeded")
-    checkpoint_counts: dict[tuple[int, int], int] = defaultdict(int)
-    for checkpoint in active_checkpoints:
-        checkpoint_counts[(checkpoint.identity_id, checkpoint.epoch)] += 1
-    if any(
-        count > limits.prefix_checkpoints_per_identity
-        for count in checkpoint_counts.values()
-    ):
-        raise ValueError("per-identity prefix checkpoint bound is exceeded")
+
+
+def _validate_event_bounds(
+    events: tuple[_PersistentEvent, ...],
+    limits: _StoreLimits,
+) -> None:
     if len(events) > limits.events_global:
         raise ValueError("global event bound is exceeded")
     event_counts: dict[str, int] = defaultdict(int)
@@ -4596,9 +4670,6 @@ def _validate_state_bounds(
         event_counts[event.bucket_key] += 1
     if any(count > limits.events_per_identity for count in event_counts.values()):
         raise ValueError("per-identity event bound is exceeded")
-    identity_ids = {identity.identity_id for identity in identities}
-    if any(sample.identity_id not in identity_ids for sample in samples):
-        raise ValueError("sample references unknown identity")
 
 
 def _event_owner_key(event: _PersistentEvent) -> _SampleOwnerKey | None:
@@ -4648,11 +4719,20 @@ def _compute_prune_plan(
 ) -> _PrunePlan:
     retained = {sample.owner_key: sample for sample in state.samples}
     victims: list[_SampleOwnerKey] = []
+    # A sample's victim key reads the sample and the full state, never what this plan has already removed, so it is computed once; taking the smallest remaining key over and over is then the same as taking the smallest keys in sorted order. That is what keeps a bulk prune — the first startup after the caps shrank — from being cubic in the retained samples.
+    sample_keys = _sample_victim_keys(state)
 
     def remove(owner: _SampleOwnerKey) -> None:
         if owner in retained:
             victims.append(owner)
             retained.pop(owner)
+
+    def remove_smallest(candidates: list[_PersistentSample], excess: int) -> None:
+        if excess <= 0:
+            return
+        ordered = sorted(candidates, key=lambda value: sample_keys[value.owner_key])
+        for sample in ordered[:excess]:
+            remove(sample.owner_key)
 
     exact_groups: dict[tuple[int, int, str], list[_PersistentSample]] = defaultdict(list)
     exact_fingerprints = {
@@ -4663,50 +4743,39 @@ def _compute_prune_plan(
         if fingerprint is not None:
             exact_groups[(sample.identity_id, sample.epoch, fingerprint)].append(sample)
     for group in exact_groups.values():
-        while sum(sample.owner_key in retained for sample in group) > limits.actuals_per_fingerprint:
-            candidates = [sample for sample in group if sample.owner_key in retained]
-            remove(
-                min(candidates, key=lambda value: _sample_victim_key(value, state)).owner_key
-            )
+        candidates = [sample for sample in group if sample.owner_key in retained]
+        remove_smallest(candidates, len(candidates) - limits.actuals_per_fingerprint)
 
     for identity in state.identities:
-        while sum(
-            sample.identity_id == identity.identity_id
-            for sample in retained.values()
-        ) > limits.samples_per_identity:
-            candidates = [
-                sample
-                for sample in retained.values()
-                if sample.identity_id == identity.identity_id
-            ]
-            remove(
-                min(candidates, key=lambda value: _sample_victim_key(value, state)).owner_key
-            )
-
-    while len(retained) > limits.samples_global:
-        identities_with_samples = {
-            sample.identity_id for sample in retained.values()
-        }
-        victim_identity = min(
-            (
-                identity
-                for identity in state.identities
-                if identity.identity_id in identities_with_samples
-            ),
-            key=lambda value: _identity_victim_key(
-                value,
-                tuple(retained.values()),
-                state,
-            ),
-        )
         candidates = [
             sample
             for sample in retained.values()
-            if sample.identity_id == victim_identity.identity_id
+            if sample.identity_id == identity.identity_id
         ]
-        remove(
-            min(candidates, key=lambda value: _sample_victim_key(value, state)).owner_key
-        )
+        remove_smallest(candidates, len(candidates) - limits.samples_per_identity)
+
+    if len(retained) > limits.samples_global:
+        # The victim identity is chosen again after every removal: its key reads the samples it still retains.
+        queues: dict[int, deque[_PersistentSample]] = {}
+        for sample in sorted(retained.values(), key=lambda value: sample_keys[value.owner_key]):
+            queues.setdefault(sample.identity_id, deque()).append(sample)
+        anchored = _anchored_owners(state)
+        coverage = _prefix_coverage(state)
+        while len(retained) > limits.samples_global:
+            victim_identity = min(
+                (
+                    identity
+                    for identity in state.identities
+                    if queues.get(identity.identity_id)
+                ),
+                key=lambda value: _identity_victim_key(
+                    value,
+                    queues[value.identity_id],
+                    anchored,
+                    coverage,
+                ),
+            )
+            remove(queues[victim_identity.identity_id].popleft().owner_key)
 
     evaluation_victims: list[tuple[_SampleOwnerKey, PredictionCandidateKey]] = []
     windows: dict[
@@ -4745,60 +4814,63 @@ def _compute_prune_plan(
     )
 
 
-def _sample_victim_key(
-    sample: _PersistentSample,
+def _anchored_owners(state: ValidatedPersistentState) -> frozenset[_SampleOwnerKey]:
+    return frozenset(anchor.owner_key for anchor in state.exact_anchors) | frozenset(
+        anchor.owner_key for anchor in state.prefix_anchors
+    )
+
+
+def _prefix_coverage(state: ValidatedPersistentState) -> dict[_SampleOwnerKey, int]:
+    coverage: dict[_SampleOwnerKey, int] = {}
+    for anchor in state.prefix_anchors:
+        coverage[anchor.owner_key] = max(
+            anchor.anchor.prefix_fingerprint.item_count,
+            coverage.get(anchor.owner_key, -1),
+        )
+    return coverage
+
+
+def _sample_victim_keys(
     state: ValidatedPersistentState,
-) -> tuple[object, ...]:
-    identity = next(
-        value for value in state.identities if value.identity_id == sample.identity_id
-    )
-    has_exact = any(anchor.owner_key == sample.owner_key for anchor in state.exact_anchors)
-    prefix_items = [
-        anchor.anchor.prefix_fingerprint.item_count
-        for anchor in state.prefix_anchors
-        if anchor.owner_key == sample.owner_key
-    ]
-    anchor_use = sample.last_used_order if has_exact or prefix_items else -1
-    coverage = max(prefix_items, default=-1)
-    return (
-        0 if sample.epoch != identity.identity.learning_epoch else 1,
-        anchor_use,
-        coverage,
-        sample.sample.observed_at_us,
-        *_sample_key_binary(sample.sample.sample_key),
-    )
+) -> dict[_SampleOwnerKey, tuple[object, ...]]:
+    active_epochs = {
+        identity.identity_id: identity.identity.learning_epoch for identity in state.identities
+    }
+    anchored = _anchored_owners(state)
+    coverage = _prefix_coverage(state)
+    return {
+        sample.owner_key: (
+            0 if sample.epoch != active_epochs[sample.identity_id] else 1,
+            sample.last_used_order if sample.owner_key in anchored else -1,
+            coverage.get(sample.owner_key, -1),
+            sample.sample.observed_at_us,
+            *_sample_key_binary(sample.sample.sample_key),
+        )
+        for sample in state.samples
+    }
 
 
 def _identity_victim_key(
     identity: _IdentityState,
-    retained_samples: tuple[_PersistentSample, ...],
-    state: ValidatedPersistentState,
+    samples: Iterable[_PersistentSample],
+    anchored: frozenset[_SampleOwnerKey],
+    coverage: Mapping[_SampleOwnerKey, int],
 ) -> tuple[object, ...]:
-    samples = tuple(
-        sample
-        for sample in retained_samples
-        if sample.identity_id == identity.identity_id
-    )
-    owners = {sample.owner_key for sample in samples}
+    """`samples` are the ones `identity` still retains."""
+    retained = tuple(samples)
     has_active = any(
-        sample.epoch == identity.identity.learning_epoch for sample in samples
+        sample.epoch == identity.identity.learning_epoch for sample in retained
     )
-    anchor_uses = [
-        sample.last_used_order
-        for sample in samples
-        if any(anchor.owner_key == sample.owner_key for anchor in state.exact_anchors)
-        or any(anchor.owner_key == sample.owner_key for anchor in state.prefix_anchors)
-    ]
-    coverages = [
-        anchor.anchor.prefix_fingerprint.item_count
-        for anchor in state.prefix_anchors
-        if anchor.owner_key in owners
-    ]
-    oldest = min((sample.sample.observed_at_us for sample in samples), default=-1)
+    anchor_use = max(
+        (sample.last_used_order for sample in retained if sample.owner_key in anchored),
+        default=-1,
+    )
+    covered = max((coverage.get(sample.owner_key, -1) for sample in retained), default=-1)
+    oldest = min((sample.sample.observed_at_us for sample in retained), default=-1)
     return (
         1 if has_active else 0,
-        max(anchor_uses, default=-1),
-        max(coverages, default=-1),
+        anchor_use,
+        covered,
         oldest,
         *_identity_binary_key(identity.identity),
     )

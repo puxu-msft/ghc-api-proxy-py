@@ -2558,8 +2558,8 @@ async def test_fresh_schema_manifest_pragmas_path_and_lifecycle(tmp_path: Path) 
     identity = _identity()
 
     assert store._limits == _StoreLimits(  # pyright: ignore[reportPrivateUsage]
-        samples_per_identity=4_096,
-        samples_global=32_768,
+        samples_per_identity=256,
+        samples_global=512,
         actuals_per_fingerprint=5,
         evaluations_per_window=128,
         events_per_identity=4_096,
@@ -4306,6 +4306,114 @@ async def test_all_sample_evaluation_event_bounds_cascade_and_empty_metadata(tmp
         "SELECT count(*) FROM identity_state WHERE actual_provider = 'transient'",
     ) == 0
     await store.close()
+
+
+@pytest.mark.asyncio
+async def test_a_store_over_lowered_caps_is_pruned_at_startup_instead_of_refused(
+    tmp_path: Path,
+) -> None:
+    """Caps shrink between releases — 2026-09-24 cut samples from 4,096/32,768 to 256/512 (spec §8.5).
+
+    A store written under the old caps is valid in every other respect, so it must start: the migration transaction prunes it to the new caps in §8.5 victim order instead of refusing it as invalid state. Every sample here carries an exact anchor whose use order is its insertion order, so the per-identity cap drops the oldest two of the first identity, and the global cap then keeps choosing the identity whose newest anchor use is older — the first one — until four samples remain.
+    """
+    path = tmp_path / "over-cap.sqlite3"
+    second = _identity(actual_provider="provider-b")
+    first_samples = [_sample(index) for index in range(5)]
+    second_samples = [_sample(index, identity=second) for index in range(5, 8)]
+    writer = TokenLearningStore(
+        path,
+        _limits=_StoreLimits(samples_per_identity=10, samples_global=10),
+    )
+    await writer.start()
+    for sample in (*first_samples, *second_samples):
+        await writer.apply_sample(sample, _transition_for(sample))
+    await writer.close()
+
+    restarted = TokenLearningStore(
+        path,
+        _limits=_StoreLimits(samples_per_identity=3, samples_global=4),
+    )
+    await restarted.start()
+    try:
+        retained = await _rows(
+            path,
+            "SELECT process_boot_id, request_id, attempt_index FROM samples ORDER BY committed_order",
+        )
+        assert retained == tuple(
+            sample.sample_key for sample in (first_samples[4], *second_samples)
+        )
+        first_snapshot = await restarted.snapshot_for_prediction(first_samples[0].identity)
+        assert [sample.sample_key for sample in first_snapshot.samples] == [
+            first_samples[4].sample_key
+        ]
+        for table in ("prediction_records", "exact_anchors", "prefix_anchors"):
+            assert await _scalar(path, f"SELECT count(*) FROM {table}") == 4
+    finally:
+        await restarted.close()
+
+
+@pytest.mark.asyncio
+async def test_a_writer_heals_samples_an_older_release_wrote_past_the_caps(tmp_path: Path) -> None:
+    """During a rolling restart the old release drains its learning queue under its own, wider caps while the new one already serves.
+
+    What it leaves behind is over the current caps and valid in every other respect. The reader must keep publishing it rather than fail every refresh, and the next sample transaction must prune it back — before the fix, both refused it as invalid state until the next restart.
+    """
+    path = tmp_path / "handover.sqlite3"
+    current = TokenLearningStore(path, _limits=_StoreLimits(samples_per_identity=2, samples_global=2))
+    await current.start()
+    older = TokenLearningStore(path, _limits=_StoreLimits(samples_per_identity=10, samples_global=10))
+    await older.start()
+    try:
+        for index in range(4):
+            sample = _sample(index)
+            await older.apply_sample(sample, _transition_for(sample))
+
+        snapshot = await current.snapshot_for_prediction(_sample(0).identity)
+        assert current.last_refresh_error is None
+        assert len(snapshot.samples) == 4
+
+        newest = _sample(4)
+        await current.apply_sample(newest, _transition_for(newest))
+        assert await _scalar(path, "SELECT count(*) FROM samples") == 2
+    finally:
+        await older.close()
+        await current.close()
+
+
+@pytest.mark.asyncio
+async def test_a_read_decodes_only_the_sample_rows_that_changed(tmp_path: Path) -> None:
+    """Decoding is nearly all of what a full read costs (spec §8.2), and every transaction reads in full.
+
+    An unchanged row comes back as the object decoded last time; a row whose stored values moved — here `last_used_order`, the one column an UPDATE touches — is decoded again, so reuse can never serve a stale sample.
+    """
+    store = TokenLearningStore(tmp_path / "memo.sqlite3")
+    await store.start()
+    try:
+        used, idle = _sample(0), _sample(1)
+        for sample in (used, idle):
+            await store.apply_sample(sample, _transition_for(sample))
+
+        def decoded() -> dict[tuple[str, str, int], Any]:
+            state = store._validated_state  # pyright: ignore[reportPrivateUsage]
+            return {sample.sample.sample_key: sample for sample in state.samples}
+
+        before = decoded()
+        await store.record_anchor_use(
+            AnchorUseIntent(
+                AnchorKind.EXACT,
+                used.identity,
+                0,
+                used.features.full_fingerprint,
+                (used.sample_key,),
+            )
+        )
+        after = decoded()
+
+        assert after[idle.sample_key] is before[idle.sample_key]
+        assert after[used.sample_key] is not before[used.sample_key]
+        assert after[used.sample_key].last_used_order > before[used.sample_key].last_used_order
+    finally:
+        await store.close()
 
 
 @pytest.mark.asyncio
