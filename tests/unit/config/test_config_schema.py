@@ -4,6 +4,7 @@ import pytest
 import yaml
 from pydantic import ValidationError
 
+from app.config.provider import pin_restart_only
 from app.config.schema import (
     NOT_HOT_RELOADABLE,
     GithubCopilotProviderConfig,
@@ -289,6 +290,19 @@ def test_restart_only_paths_are_recorded() -> None:
     assert "proxy" in NOT_HOT_RELOADABLE
     assert "reactive_rate_limiter" in NOT_HOT_RELOADABLE
     assert "upstream_request_retry.max_total" in NOT_HOT_RELOADABLE
+
+
+def test_unportable_reasoning_policy_defaults_to_degrade_and_pins_strict_reload() -> None:
+    startup = ProxyConfig()
+    strict = ProxyConfig.model_validate(
+        {"model_translation": {"to_anthropic_messages": {"unportable_reasoning_carrier": "refuse"}}}
+    )
+    assert startup.model_translation.to_anthropic_messages.unportable_reasoning_carrier == "degrade"
+    assert strict.model_translation.to_anthropic_messages.unportable_reasoning_carrier == "refuse"
+
+    outcome = pin_restart_only(startup, strict)
+    assert "model_translation.to_anthropic_messages.unportable_reasoning_carrier" in outcome.restart_required
+    assert outcome.config.model_translation.to_anthropic_messages.unportable_reasoning_carrier == "degrade"
 
 
 def test_the_listen_address_is_restart_only() -> None:

@@ -127,9 +127,9 @@ class RecordingHistoryWriter:
 def test_publish_submits_a_history_projection_when_writer_is_available(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    completion, trace, _store, _records, _logger = _coordinator(monkeypatch)
+    completion, trace, _store, _records, _logger, _fake_chain = _coordinator(monkeypatch)
     writer = RecordingHistoryWriter()
-    cast(Any, completion.chain).history_writer = writer
+    completion.history_writer = writer
     trace.terminal_status = "completed"
     completion.mark_response_ready(200)
     completion.note_asgi_message_sent({"type": "http.response.start", "status": 200})
@@ -157,7 +157,14 @@ def _coordinator(
     monkeypatch: pytest.MonkeyPatch,
     *,
     registry: ActiveRequestRegistry | None = None,
-) -> tuple[RequestCompletionCoordinator, RequestTrace, ActiveRequestRegistry, list[dict[str, Any]], RecordingLogger]:
+) -> tuple[
+    RequestCompletionCoordinator,
+    RequestTrace,
+    ActiveRequestRegistry,
+    list[dict[str, Any]],
+    RecordingLogger,
+    Any,
+]:
     store = registry or ActiveRequestRegistry()
     trace = RequestTrace(
         method="POST",
@@ -198,7 +205,7 @@ def _coordinator(
 
     monkeypatch.setattr(completion_module, "write_finalized_record", keep_record)
     monkeypatch.setattr(completion_module, "get_logger", logger_for)
-    chain = cast(
+    fake_chain = cast(
         Any,
         SimpleNamespace(
             active_requests=store,
@@ -206,18 +213,25 @@ def _coordinator(
         ),
     )
     return (
-        RequestCompletionCoordinator(chain, trace, trace.request_id),
+        RequestCompletionCoordinator(
+            active_requests=store,
+            history_writer=None,
+            capabilities=fake_chain.capabilities,
+            trace=trace,
+            request_id=trace.request_id,
+        ),
         trace,
         store,
         records,
         logger,
+        fake_chain,
     )
 
 
 def test_finalized_request_is_one_immutable_source_for_store_json_and_console(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    completion, trace, store, records, logger = _coordinator(monkeypatch)
+    completion, trace, store, records, logger, _fake_chain = _coordinator(monkeypatch)
     trace.terminal_status = "completed"
     trace.client_actions = (
         ClientAction(ClientActionRequirement.REQUIRED, "function_call", "Bash", 0),
@@ -435,7 +449,7 @@ def test_finalized_request_is_one_immutable_source_for_store_json_and_console(
 def test_a_successful_retry_is_reported_as_retry(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    completion, trace, _store, records, logger = _coordinator(monkeypatch)
+    completion, trace, _store, records, logger, _fake_chain = _coordinator(monkeypatch)
     trace.attempts = 2
     trace.replaced_failures.append(
         "StreamDeadlineError('attempt exceeded its deadline')"
@@ -451,7 +465,7 @@ def test_a_successful_retry_is_reported_as_retry(
     assert records[0]["status"] == "retry"
     assert logger.events[0][1] == "retry"
     rendered = str(logger.events[0][0])
-    assert rendered.startswith("200 openai-responses/gpt-model[none] ")
+    assert rendered.startswith("200 openai-responses/gpt-model ")
     assert "POST /responses" not in rendered
     assert "req=req_1" not in rendered
 
@@ -459,7 +473,7 @@ def test_a_successful_retry_is_reported_as_retry(
 def test_token_admission_observations_are_ordered_complete_and_prompt_free(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    completion, trace, _store, records, _logger = _coordinator(monkeypatch)
+    completion, trace, _store, records, _logger, _fake_chain = _coordinator(monkeypatch)
     context = RequestContext(
         inbound_format=WireFormat.OPENAI_RESPONSES,
         requested_model="gpt-model",
@@ -544,7 +558,7 @@ def test_interruption_evidence_is_ordered_typed_and_orthogonal_to_delivery(
         def __repr__(self) -> str:
             raise RuntimeError("repr failed")
 
-    completion, _trace, _store, records, _logger = _coordinator(monkeypatch)
+    completion, _trace, _store, records, _logger, _fake_chain = _coordinator(monkeypatch)
     completion.mark_response_ready(200)
     completion.note_http_disconnect(phase=InterruptionPhase.REQUEST_BODY)
     completion.note_asgi_receive_error(
@@ -601,7 +615,7 @@ def test_interruption_evidence_is_ordered_typed_and_orthogonal_to_delivery(
 def test_error_only_response_serializes_an_absent_usage_dto(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    completion, trace, _store, records, _logger = _coordinator(monkeypatch)
+    completion, trace, _store, records, _logger, _fake_chain = _coordinator(monkeypatch)
     observer = ResponsesObserver()
     observer.observe_event(
         SseEvent(
@@ -624,7 +638,7 @@ def test_one_sink_failure_does_not_block_later_sinks_or_escape(
     monkeypatch: pytest.MonkeyPatch,
     caplog: pytest.LogCaptureFixture,
 ) -> None:
-    completion, _trace, store, records, logger = _coordinator(
+    completion, _trace, store, records, logger, _fake_chain = _coordinator(
         monkeypatch,
         registry=ExplodingStore(),
     )
@@ -645,7 +659,7 @@ def test_one_sink_failure_does_not_block_later_sinks_or_escape(
 def test_sink_and_failure_reporter_can_both_fail_without_escaping(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    completion, _trace, store, records, logger = _coordinator(
+    completion, _trace, store, records, logger, _fake_chain = _coordinator(
         monkeypatch,
         registry=ExplodingStore(),
     )
@@ -740,7 +754,7 @@ class DynamicStartResponse(Response):
 async def test_accounted_response_is_transparent_and_runs_fastapi_attached_background(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    completion, _trace, store, _records, _logger = _coordinator(monkeypatch)
+    completion, _trace, store, _records, _logger, _fake_chain = _coordinator(monkeypatch)
     wrapped = JSONResponse({"ok": True}, headers={"x-original": "yes"})
     completion.mark_response_ready(wrapped.status_code)
     response = _AccountedResponse(wrapped, completion)
@@ -782,7 +796,7 @@ async def test_accounted_response_is_transparent_and_runs_fastapi_attached_backg
 async def test_status_mutation_is_reflected_in_wire_legacy_and_delivery_intent(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    completion, _trace, store, _records, _logger = _coordinator(monkeypatch)
+    completion, _trace, store, _records, _logger, _fake_chain = _coordinator(monkeypatch)
     wrapped = Response(b"body", status_code=200)
     completion.mark_response_ready(200)
     response = _AccountedResponse(wrapped, completion)
@@ -805,7 +819,7 @@ async def test_status_mutation_is_reflected_in_wire_legacy_and_delivery_intent(
 async def test_actual_dynamic_start_status_overrides_the_response_attribute(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    completion, _trace, store, _records, _logger = _coordinator(monkeypatch)
+    completion, _trace, store, _records, _logger, _fake_chain = _coordinator(monkeypatch)
     wrapped = DynamicStartResponse(status_code=200)
     completion.mark_response_ready(200)
     response = _AccountedResponse(wrapped, completion)
@@ -834,7 +848,7 @@ async def test_send_origin_oserror_is_gone_at_the_actual_frontier(
     fail_on: str,
     expected_state: DeliveryState,
 ) -> None:
-    completion, _trace, store, _records, _logger = _coordinator(monkeypatch)
+    completion, _trace, store, _records, _logger, _fake_chain = _coordinator(monkeypatch)
     wrapped = Response(b"body")
     completion.mark_response_ready(200)
     response = _AccountedResponse(wrapped, completion)
@@ -861,7 +875,7 @@ async def test_send_origin_oserror_is_gone_at_the_actual_frontier(
 async def test_non_send_oserror_is_a_server_failure_not_a_disconnect(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    completion, _trace, store, _records, _logger = _coordinator(monkeypatch)
+    completion, _trace, store, _records, _logger, _fake_chain = _coordinator(monkeypatch)
     wrapped = BrokenResponse()
     completion.mark_response_ready(200)
     response = _AccountedResponse(wrapped, completion)
@@ -884,7 +898,7 @@ async def test_non_send_oserror_is_a_server_failure_not_a_disconnect(
 async def test_pathsend_is_a_valid_terminal_with_unknown_application_bytes(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    completion, _trace, store, _records, _logger = _coordinator(monkeypatch)
+    completion, _trace, store, _records, _logger, _fake_chain = _coordinator(monkeypatch)
     wrapped = PathsendResponse()
     completion.mark_response_ready(200)
     response = _AccountedResponse(wrapped, completion)
@@ -905,7 +919,7 @@ async def test_pathsend_is_a_valid_terminal_with_unknown_application_bytes(
 async def test_a_response_returning_without_a_terminal_is_recorded_as_failed(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    completion, _trace, store, _records, _logger = _coordinator(monkeypatch)
+    completion, _trace, store, _records, _logger, _fake_chain = _coordinator(monkeypatch)
     wrapped = MissingTerminalResponse()
     completion.mark_response_ready(200)
     response = _AccountedResponse(wrapped, completion)
@@ -926,7 +940,7 @@ async def test_a_response_returning_without_a_terminal_is_recorded_as_failed(
 async def test_background_failure_is_post_delivery_and_does_not_rewrite_client_verdict(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    completion, _trace, store, _records, _logger = _coordinator(monkeypatch)
+    completion, _trace, store, _records, _logger, _fake_chain = _coordinator(monkeypatch)
 
     def fail_background() -> None:
         raise RuntimeError("background failed")
@@ -953,7 +967,7 @@ async def test_background_failure_is_post_delivery_and_does_not_rewrite_client_v
 async def test_accepted_custom_response_failure_is_wrapped_not_guessed_as_background(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    completion, _trace, store, _records, _logger = _coordinator(monkeypatch)
+    completion, _trace, store, _records, _logger, _fake_chain = _coordinator(monkeypatch)
     wrapped = AcceptedThenBrokenResponse(status_code=200)
     completion.mark_response_ready(200)
     response = _AccountedResponse(wrapped, completion)
@@ -975,7 +989,7 @@ async def test_accepted_custom_response_failure_is_wrapped_not_guessed_as_backgr
 async def test_an_accepted_http_error_remains_an_operator_failure(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    completion, _trace, store, _records, _logger = _coordinator(monkeypatch)
+    completion, _trace, store, _records, _logger, _fake_chain = _coordinator(monkeypatch)
     wrapped = Response(b"no", status_code=404)
     completion.mark_response_ready(404)
     response = _AccountedResponse(wrapped, completion)
@@ -993,7 +1007,7 @@ async def test_an_accepted_http_error_remains_an_operator_failure(
 def test_implicit_settle_preserves_an_observed_zero_byte_upstream_body(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    completion, trace, _store, _records, _logger = _coordinator(monkeypatch)
+    completion, trace, _store, _records, _logger, _fake_chain = _coordinator(monkeypatch)
     trace.received = 0
     trace.received_known = True
 
@@ -1024,7 +1038,7 @@ def test_unconsumed_stream_status_body_is_unknown_not_an_observed_empty_body() -
 def test_provider_usage_integer_beyond_javascript_precision_survives_finalization(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    completion, trace, _store, records, _logger = _coordinator(monkeypatch)
+    completion, trace, _store, records, _logger, _fake_chain = _coordinator(monkeypatch)
     value = 10**100
     observer = ResponsesObserver()
     observer.observe_event(
@@ -1071,7 +1085,7 @@ async def test_legacy_freeze_failure_does_not_replace_a_primary_send_error(
     monkeypatch: pytest.MonkeyPatch,
     caplog: pytest.LogCaptureFixture,
 ) -> None:
-    completion, trace, store, records, logger = _coordinator(monkeypatch)
+    completion, trace, store, records, logger, _fake_chain = _coordinator(monkeypatch)
     trace.usage = {"unsupported": object()}
     wrapped = Response(b"body")
     completion.mark_response_ready(200)
@@ -1098,7 +1112,7 @@ async def test_legacy_freeze_failure_does_not_replace_a_primary_send_error(
 async def test_memoryview_response_body_counts_at_the_send_frontier(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    completion, _trace, store, _records, _logger = _coordinator(monkeypatch)
+    completion, _trace, store, _records, _logger, _fake_chain = _coordinator(monkeypatch)
     wrapped = Response(memoryview(b"body"))
     completion.mark_response_ready(200)
     response = _AccountedResponse(wrapped, completion)
@@ -1125,7 +1139,7 @@ async def test_non_disconnect_send_failure_is_a_server_failure_at_either_frontie
     fail_on: str,
     expected_state: DeliveryState,
 ) -> None:
-    completion, _trace, store, _records, _logger = _coordinator(monkeypatch)
+    completion, _trace, store, _records, _logger, _fake_chain = _coordinator(monkeypatch)
     wrapped = Response(b"body")
     completion.mark_response_ready(200)
     response = _AccountedResponse(wrapped, completion)
@@ -1155,7 +1169,7 @@ async def test_wrapped_cancellation_is_gone_before_acceptance(
     after_start: bool,
     expected_state: DeliveryState,
 ) -> None:
-    completion, _trace, store, _records, _logger = _coordinator(monkeypatch)
+    completion, _trace, store, _records, _logger, _fake_chain = _coordinator(monkeypatch)
     wrapped = CancelledResponse(after_start=after_start)
     completion.mark_response_ready(200)
     response = _AccountedResponse(wrapped, completion)
@@ -1178,7 +1192,7 @@ async def test_wrapped_cancellation_is_gone_before_acceptance(
 async def test_provider_failure_wins_over_a_pre_acceptance_disconnect(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    completion, trace, store, _records, _logger = _coordinator(monkeypatch)
+    completion, trace, store, _records, _logger, _fake_chain = _coordinator(monkeypatch)
     observer = ResponsesObserver()
     observer.observe_response({
         "status": "failed",
@@ -1208,7 +1222,7 @@ async def test_provider_failure_wins_over_a_pre_acceptance_disconnect(
 async def test_an_accepted_provider_failure_is_not_relabelled_from_http_200(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    completion, trace, store, _records, _logger = _coordinator(monkeypatch)
+    completion, trace, store, _records, _logger, _fake_chain = _coordinator(monkeypatch)
     observer = ResponsesObserver()
     observer.observe_response({"status": "cancelled"})
     trace.absorb_response(observer.snapshot())
@@ -1230,7 +1244,7 @@ async def test_an_accepted_provider_failure_is_not_relabelled_from_http_200(
 def test_secondary_unwind_failure_does_not_replace_the_primary_delivery_failure(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    completion, _trace, _store, _records, _logger = _coordinator(monkeypatch)
+    completion, _trace, _store, _records, _logger, _fake_chain = _coordinator(monkeypatch)
     completion.note_send_failure(OSError("client transport closed"))
     completion.note_wrapped_failure(
         RuntimeError("cleanup also failed"),
@@ -1250,7 +1264,7 @@ def test_secondary_unwind_failure_does_not_replace_the_primary_delivery_failure(
 async def test_stream_cleanup_failure_does_not_replace_a_send_disconnect(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    completion, trace, store, _records, _logger = _coordinator(monkeypatch)
+    completion, trace, store, _records, _logger, fake_chain = _coordinator(monkeypatch)
 
     async def body() -> AsyncGenerator[bytes]:
         try:
@@ -1259,7 +1273,7 @@ async def test_stream_cleanup_failure_does_not_replace_a_send_disconnect(
             raise RuntimeError("inner cleanup failed")
 
     accounting = _StreamAccounting(
-        chain=completion.chain,
+        chain=fake_chain,
         request_id=trace.request_id,
         trace=trace,
         completion=completion,
@@ -1308,14 +1322,14 @@ async def test_stream_cleanup_failure_does_not_replace_a_send_disconnect(
 async def test_stream_disconnect_note_survives_authoritative_ending(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    completion, trace, store, records, _logger = _coordinator(monkeypatch)
+    completion, trace, store, records, _logger, fake_chain = _coordinator(monkeypatch)
 
     async def body() -> AsyncGenerator[bytes]:
         if False:
             yield b""
 
     accounting = _StreamAccounting(
-        chain=completion.chain,
+        chain=fake_chain,
         request_id=trace.request_id,
         trace=trace,
         completion=completion,
@@ -1362,7 +1376,7 @@ async def test_stream_disconnect_note_survives_authoritative_ending(
 async def test_accepted_native_terminal_survives_later_cleanup_failure(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    completion, trace, store, _records, _logger = _coordinator(monkeypatch)
+    completion, trace, store, _records, _logger, fake_chain = _coordinator(monkeypatch)
     terminal_sent = asyncio.Event()
     hold_tail = asyncio.Event()
     assembler = responses_passthrough_assembler()
@@ -1383,7 +1397,7 @@ async def test_accepted_native_terminal_survives_later_cleanup_failure(
             raise RuntimeError("transport tail cleanup failed")
 
     accounting = _StreamAccounting(
-        chain=completion.chain,
+        chain=fake_chain,
         request_id=trace.request_id,
         trace=trace,
         completion=completion,
@@ -1425,7 +1439,7 @@ async def test_accepted_native_terminal_survives_later_cleanup_failure(
 async def test_pre_acceptance_cancellation_remains_primary_when_cleanup_fails(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    completion, trace, store, _records, _logger = _coordinator(monkeypatch)
+    completion, trace, store, _records, _logger, fake_chain = _coordinator(monkeypatch)
     nonterminal_sent = asyncio.Event()
     hold_tail = asyncio.Event()
 
@@ -1437,7 +1451,7 @@ async def test_pre_acceptance_cancellation_remains_primary_when_cleanup_fails(
             raise RuntimeError("transport tail cleanup failed")
 
     accounting = _StreamAccounting(
-        chain=completion.chain,
+        chain=fake_chain,
         request_id=trace.request_id,
         trace=trace,
         completion=completion,
@@ -1503,7 +1517,7 @@ async def test_response_receive_error_is_recorded_and_re_raised_by_identity(
     monkeypatch: pytest.MonkeyPatch,
     error_type: type[RuntimeError],
 ) -> None:
-    completion, trace, store, _records, _logger = _coordinator(monkeypatch)
+    completion, trace, store, _records, _logger, fake_chain = _coordinator(monkeypatch)
     monkeypatch.setattr(completion_module, "logger", BaseExplodingReporter())
     nonterminal_sent = asyncio.Event()
     hold_body = asyncio.Event()
@@ -1514,7 +1528,7 @@ async def test_response_receive_error_is_recorded_and_re_raised_by_identity(
         await hold_body.wait()
 
     accounting = _StreamAccounting(
-        chain=completion.chain,
+        chain=fake_chain,
         request_id=trace.request_id,
         trace=trace,
         completion=completion,
@@ -1569,7 +1583,7 @@ async def test_response_receive_error_is_recorded_and_re_raised_by_identity(
 async def test_direct_response_task_cancellation_does_not_invent_receive_evidence(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    completion, trace, store, _records, _logger = _coordinator(monkeypatch)
+    completion, trace, store, _records, _logger, fake_chain = _coordinator(monkeypatch)
     nonterminal_sent = asyncio.Event()
     hold_body = asyncio.Event()
     hold_receive = asyncio.Event()
@@ -1579,7 +1593,7 @@ async def test_direct_response_task_cancellation_does_not_invent_receive_evidenc
         await hold_body.wait()
 
     accounting = _StreamAccounting(
-        chain=completion.chain,
+        chain=fake_chain,
         request_id=trace.request_id,
         trace=trace,
         completion=completion,
@@ -1617,7 +1631,7 @@ async def test_direct_response_task_cancellation_does_not_invent_receive_evidenc
 async def test_stream_start_failure_publishes_without_starting_the_body(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    completion, trace, store, records, logger = _coordinator(monkeypatch)
+    completion, trace, store, records, logger, fake_chain = _coordinator(monkeypatch)
     trace.response_observation = None
     context = RequestContext(
         inbound_format=WireFormat.OPENAI_RESPONSES,
@@ -1634,7 +1648,7 @@ async def test_stream_start_failure_publishes_without_starting_the_body(
         yield b"never sent"
 
     accounting = _StreamAccounting(
-        chain=completion.chain,
+        chain=fake_chain,
         request_id=trace.request_id,
         trace=trace,
         completion=completion,
@@ -1690,13 +1704,13 @@ async def test_stream_start_failure_publishes_without_starting_the_body(
 async def test_stream_start_server_failure_projects_its_primary_detail(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    completion, trace, store, _records, _logger = _coordinator(monkeypatch)
+    completion, trace, store, _records, _logger, fake_chain = _coordinator(monkeypatch)
 
     async def body() -> AsyncGenerator[bytes]:
         yield b"never sent"
 
     accounting = _StreamAccounting(
-        chain=completion.chain,
+        chain=fake_chain,
         request_id=trace.request_id,
         trace=trace,
         completion=completion,
@@ -1724,14 +1738,14 @@ async def test_stream_start_server_failure_projects_its_primary_detail(
 async def test_local_stream_failure_preserves_the_error_without_recording_its_text(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    completion, trace, store, records, logger = _coordinator(monkeypatch)
+    completion, trace, store, records, logger, fake_chain = _coordinator(monkeypatch)
 
     async def body() -> AsyncGenerator[bytes]:
         raise RuntimeError("local-stream-secret")
         yield b"unreachable"
 
     accounting = _StreamAccounting(
-        chain=completion.chain,
+        chain=fake_chain,
         request_id=trace.request_id,
         trace=trace,
         completion=completion,
@@ -1775,7 +1789,7 @@ async def test_drained_native_non_completion_waits_for_the_final_asgi_body(
     monkeypatch: pytest.MonkeyPatch,
     reported_failure: bool,
 ) -> None:
-    completion, trace, store, _records, _logger = _coordinator(monkeypatch)
+    completion, trace, store, _records, _logger, fake_chain = _coordinator(monkeypatch)
     assembler = responses_passthrough_assembler()
     if reported_failure:
         assembler.push(
@@ -1789,7 +1803,7 @@ async def test_drained_native_non_completion_waits_for_the_final_asgi_body(
         yield b"native failure or unterminated body"
 
     accounting = _StreamAccounting(
-        chain=completion.chain,
+        chain=fake_chain,
         request_id=trace.request_id,
         trace=trace,
         completion=completion,
@@ -1825,7 +1839,7 @@ def test_reported_stream_failure_outranks_an_earlier_send_disconnect(
     monkeypatch: pytest.MonkeyPatch,
     origin: StreamFailureOrigin,
 ) -> None:
-    completion, trace, _store, _records, _logger = _coordinator(monkeypatch)
+    completion, trace, _store, _records, _logger, fake_chain = _coordinator(monkeypatch)
     reported = StreamFailure(
         event="response.failed" if origin is StreamFailureOrigin.UPSTREAM_EVENT else "",
         raw_data='{"type":"response.failed"}' if origin is StreamFailureOrigin.UPSTREAM_EVENT else "",
@@ -1845,7 +1859,7 @@ def test_reported_stream_failure_outranks_an_earlier_send_disconnect(
         ),
     )
     accounting = _StreamAccounting(
-        chain=completion.chain,
+        chain=fake_chain,
         request_id=trace.request_id,
         trace=trace,
         completion=completion,
@@ -1875,14 +1889,14 @@ async def test_empty_one_shot_body_crosses_only_after_its_own_send_returns(
     monkeypatch: pytest.MonkeyPatch,
     fail_semantic_send: bool,
 ) -> None:
-    completion, trace, store, _records, _logger = _coordinator(monkeypatch)
+    completion, trace, store, _records, _logger, fake_chain = _coordinator(monkeypatch)
 
     async def empty_body() -> AsyncGenerator[bytes]:
         if False:
             yield b""
 
     accounting = _StreamAccounting(
-        chain=completion.chain,
+        chain=fake_chain,
         request_id=trace.request_id,
         trace=trace,
         completion=completion,
@@ -1929,13 +1943,13 @@ async def test_empty_one_shot_body_crosses_only_after_its_own_send_returns(
 async def test_final_empty_stream_send_failure_is_a_late_fact_after_natural_drain(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    completion, trace, store, records, logger = _coordinator(monkeypatch)
+    completion, trace, store, records, logger, fake_chain = _coordinator(monkeypatch)
 
     async def body() -> AsyncGenerator[bytes]:
         yield b"chunk"
 
     accounting = _StreamAccounting(
-        chain=completion.chain,
+        chain=fake_chain,
         request_id=trace.request_id,
         trace=trace,
         completion=completion,
@@ -1982,7 +1996,7 @@ async def test_stream_background_failure_is_a_late_fact_after_natural_drain(
     monkeypatch: pytest.MonkeyPatch,
     failure: BaseException,
 ) -> None:
-    completion, trace, store, records, logger = _coordinator(monkeypatch)
+    completion, trace, store, records, logger, fake_chain = _coordinator(monkeypatch)
 
     async def body() -> AsyncGenerator[bytes]:
         yield b"chunk"
@@ -1991,7 +2005,7 @@ async def test_stream_background_failure_is_a_late_fact_after_natural_drain(
         raise failure
 
     accounting = _StreamAccounting(
-        chain=completion.chain,
+        chain=fake_chain,
         request_id=trace.request_id,
         trace=trace,
         completion=completion,
@@ -2038,7 +2052,7 @@ async def test_stream_background_failure_is_a_late_fact_after_natural_drain(
 async def test_background_and_cleanup_failures_both_reach_the_final_record(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    completion, trace, store, records, logger = _coordinator(monkeypatch)
+    completion, trace, store, records, logger, fake_chain = _coordinator(monkeypatch)
 
     async def body() -> AsyncGenerator[bytes]:
         yield b"chunk"
@@ -2050,7 +2064,7 @@ async def test_background_and_cleanup_failures_both_reach_the_final_record(
         raise OSError("cleanup failed second")
 
     accounting = _StreamAccounting(
-        chain=completion.chain,
+        chain=fake_chain,
         request_id=trace.request_id,
         trace=trace,
         completion=completion,

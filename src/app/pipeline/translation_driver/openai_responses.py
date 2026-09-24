@@ -1105,12 +1105,7 @@ def _reasoning_item(
     try:
         return reasoning_to_responses(content, bridge_for_client=bridge_for_client)
     except ReasoningNotPortable:
-        state = content.state
-        source = state.format.value if state is not None else content.source_format
-        conversion.record(
-            LossCode.REASONING_STATE_NOT_PORTABLE,
-            f"{source} cannot be written to a Responses upstream",
-        )
+        conversion.record_nonportable_reasoning()
         return None
 
 

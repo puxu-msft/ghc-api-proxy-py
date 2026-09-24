@@ -113,6 +113,46 @@ def test_pipeline_exceptions_stay_importable_without_the_pipeline() -> None:
     assert not [name for name in errors if name.startswith(("app.upstream", "app.model_provider.ghc"))]
 
 
+def test_the_pipeline_does_not_reach_back_into_the_assembly_record() -> None:
+    """`app.core` holds the assembly record; the request path must not import it.
+
+    Closed 2026-09-16: `app.pipeline.driver`, `delivery_policy`, `reply` and
+    `hand_over` took a `Chain`, `app.observability.request_trace` took one for two
+    terminal glyphs, and `app.tokenization.snapshot_store` reached two id parsers
+    in `app.core`. Together those edges put `app.core` inside a seven-package
+    import cycle, which meant no package on the request path could be imported,
+    tested or moved without dragging in the assembly and everything it holds.
+    The driver now takes a `DriverDeps` protocol from its own package, the leaf
+    functions take the config section or capability they read, and the id parsers
+    live in `app.tokenization` where their only live consumer is.
+
+    Static imports, `TYPE_CHECKING` included: an annotation-only `Chain` on a
+    public signature is how the runtime edge comes back, so the ban covers both.
+    `app.server`, `app.cli` and `app.debug` may still import `app.core` — they
+    are the assembly's consumers, outside the cycle.
+    """
+    roots = ("src/app/pipeline", "src/app/observability", "src/app/tokenization")
+    offenders: list[str] = []
+    for root in roots:
+        for path in sorted(Path(root).rglob("*.py")):
+            for node in ast.walk(ast.parse(path.read_text(), filename=str(path))):
+                if isinstance(node, ast.Import):
+                    offenders += [
+                        f"{path}: import {alias.name}"
+                        for alias in node.names
+                        if alias.name == "app.core" or alias.name.startswith("app.core.")
+                    ]
+                elif (
+                    isinstance(node, ast.ImportFrom)
+                    and node.level == 0
+                    and node.module is not None
+                    and (node.module == "app.core" or node.module.startswith("app.core."))
+                ):
+                    offenders.append(f"{path}: from {node.module} import ...")
+
+    assert offenders == [], "\n".join(offenders)
+
+
 def test_h2_is_imported_only_for_its_types() -> None:
     """A cheap architecture signal, named for what it checks rather than for what it would be nice to know.
 

@@ -21,6 +21,9 @@ dist/
 
 .DS_Store
 
+# Agent-created linked worktrees; each is its own checkout, never repository content.
+/.claude/worktrees/
+
 # Agent-authored development state: work records, evidence and archives.
 # Kept out of the main branch by the standing convention; carry it on its own branch if it needs versioning.
 .dev/

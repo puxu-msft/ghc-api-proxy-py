@@ -5,7 +5,7 @@ Split out of `app.server.handler` on 2026-08-22. These three read a reply that h
 
 from typing import Any, cast
 
-from app.core.chain import Chain
+from app.config.schema import UpstreamRequestRetryConfig
 from app.pipeline.delivery import CompletedBlock
 from app.pipeline.delivery.assembling import Terminal
 from app.pipeline.delivery.formats.anthropic_messages import (
@@ -19,9 +19,16 @@ from app.pipeline.handled import (
     HandledRequest,
 )
 from app.pipeline.request import WireFormat
+from app.pipeline.translation_driver.registry import TranslatorRegistry
 
 
-def response_payload(chain: Chain, handled: HandledRequest, body: dict[str, Any]) -> dict[str, Any]:
+def response_payload(
+    handled: HandledRequest,
+    body: dict[str, Any],
+    *,
+    translators: TranslatorRegistry,
+    retry: UpstreamRequestRetryConfig,
+) -> dict[str, Any]:
     """Bring an upstream body back to the format the client asked in.
 
     Without this a translated route answers in the upstream's shape, which the client did not ask for and cannot parse.
@@ -35,16 +42,14 @@ def response_payload(chain: Chain, handled: HandledRequest, body: dict[str, Any]
         return body
     if not route.translation_required:
         return body
-    translated, semantic = chain.translators.translate_response(
+    translated, semantic = translators.translate_response(
         body,
         source=route.target_format,
         target=route.inbound_format,
         # Put here by the request half. Without it a `tool_search_call` has no name to come back under, and the client is handed a turn in which the model appears to have said nothing while it is in fact waiting for a search.
         client_search_tool=handled.context.client_search_tool,
         hosted_web_search_expected=handled.context.hosted_web_search_expected,
-        hand_over_stop_reasons=frozenset(
-            chain.config.upstream_request_retry.hand_over_stop_reasons
-        ),
+        hand_over_stop_reasons=frozenset(retry.hand_over_stop_reasons),
         options=handled.context.translation_options,
     )
     handled.context.extras["semantic_stop_reason"] = semantic.stop_reason

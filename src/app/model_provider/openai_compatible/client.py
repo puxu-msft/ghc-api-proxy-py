@@ -2,6 +2,7 @@
 
 from collections.abc import Mapping
 from typing import Any, cast
+from uuid import uuid4
 
 import httpx2
 
@@ -44,6 +45,8 @@ _OWNED_HEADERS = frozenset(
         "authorization",
         "content-type",
         "host",
+        "x-api-key",
+        "x-opencode-session",
     }
 )
 
@@ -57,6 +60,7 @@ class OpenAICompatibleClient:
         self._http = http_client
         self._config = config
         self._base_url = config.api_base_url.rstrip("/")
+        self._default_session_id = str(uuid4())
 
     @property
     def base_url(self) -> str:
@@ -65,15 +69,34 @@ class OpenAICompatibleClient:
     def _headers(
         self,
         *,
+        endpoint: ModelEndpoint | None = None,
         stream: bool = False,
+        session_id: str | None = None,
         extra_headers: Mapping[str, str] | None = None,
     ) -> dict[str, str]:
+        """The upstream headers for one protocol.
+
+        Authentication is shaped by the protocol rather than by the provider. The
+        Anthropic Messages leg is an Anthropic API, so it carries `x-api-key`;
+        `add_header_authorization` adds the `Authorization: Bearer` that gateways
+        accepting both expect. The OpenAI legs are unchanged and always send Bearer.
+        `add_header_x_opencode_session` binds the request to a conversation for
+        upstreams that route or cache on a session id, falling back to one id per
+        client when the caller has no conversation identity to offer.
+        """
         headers: dict[str, str] = {
             "Accept": "text/event-stream" if stream else "application/json",
             "Content-Type": "application/json",
         }
         if self._config.api_key:
-            headers["Authorization"] = "Bearer " + self._config.api_key
+            if endpoint is ModelEndpoint.ANTHROPIC_MESSAGES:
+                headers["x-api-key"] = self._config.api_key
+                if self._config.add_header_authorization:
+                    headers["Authorization"] = "Bearer " + self._config.api_key
+            else:
+                headers["Authorization"] = "Bearer " + self._config.api_key
+        if self._config.add_header_x_opencode_session:
+            headers["x-opencode-session"] = session_id or self._default_session_id
         if extra_headers:
             headers.update(
                 {
@@ -167,12 +190,18 @@ class OpenAICompatibleClient:
         *,
         stream: bool = False,
         extra_headers: Mapping[str, str] | None = None,
+        interaction_id: str | None = None,
     ) -> httpx2.Response:
         body = dumps(dict(payload))
         request = self._http.build_request(
             "POST",
             self._endpoint_url(endpoint),
-            headers=self._headers(stream=stream, extra_headers=extra_headers),
+            headers=self._headers(
+                endpoint=endpoint,
+                stream=stream,
+                session_id=interaction_id,
+                extra_headers=extra_headers,
+            ),
             content=body,
         )
         return await self._send(request, stream=stream)
@@ -204,7 +233,7 @@ class OpenAICompatibleClient:
         request = self._http.build_request(
             "POST",
             f"{self._endpoint_url(ModelEndpoint.ANTHROPIC_MESSAGES)}/count_tokens",
-            headers=self._headers(),
+            headers=self._headers(endpoint=ModelEndpoint.ANTHROPIC_MESSAGES),
             content=body,
         )
         return await self._send(request, stream=False)

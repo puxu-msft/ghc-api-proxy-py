@@ -41,7 +41,11 @@ from app.pipeline.subscribers import (
 from app.pipeline.subscribers.counting import COUNTING_ONLY
 from app.pipeline.translation_driver.reasoning_carrier import encode_reasoning_carrier
 from app.pipeline.translation_driver.registry import TranslatorNotFound, default_registry
-from app.pipeline.translation_driver.semantic import TranslationRefused, WebSearchNotExecutable
+from app.pipeline.translation_driver.semantic import (
+    LossCode,
+    TranslationRefused,
+    WebSearchNotExecutable,
+)
 from app.server.composition import build_chain
 from app.tokenization.estimators import estimate_anthropic_input, estimate_responses_input
 
@@ -104,6 +108,47 @@ def test_the_chain_the_server_runs_on_actually_carries_them() -> None:
     chain = build_chain(config, http_client=httpx2.AsyncClient())
 
     assert frozen_by_event(chain.subscribers) == EXPECTED_BY_EVENT
+
+
+async def test_chain_binds_the_strict_nonportable_carrier_policy() -> None:
+    config = ProxyConfig.model_validate(
+        {
+            "model_providers": {"ghc": {"type": "github_copilot"}},
+            "model_translation": {
+                "to_anthropic_messages": {"unportable_reasoning_carrier": "refuse"}
+            },
+        }
+    )
+    provider = RecordingProvider()
+    async with httpx2.AsyncClient() as client:
+        chain = build_chain(config, http_client=client, providers={"ghc": provider})
+        context = RequestContext(
+            inbound_format=WireFormat.ANTHROPIC_MESSAGES,
+            requested_model="claude-model",
+            payload={
+                "messages": [
+                    {
+                        "role": "assistant",
+                        "content": [
+                            {
+                                "type": "thinking",
+                                "thinking": "old",
+                                "signature": "copilot-api:synthetic-reasoning:v1:RU5D",
+                            }
+                        ],
+                    }
+                ]
+            },
+        )
+        context.target_format = WireFormat.ANTHROPIC_MESSAGES
+        for subscription in chain.subscribers.for_event(EVENT_ATTEMPT_PREPARE):
+            if subscription.id == REASONING_CARRIER_LAST_MILE_ID:
+                with pytest.raises(TranslationRefused) as caught:
+                    await subscription.handler(context)
+                assert caught.value.code == "reasoning_carrier_not_unwrapped"
+                break
+        else:
+            pytest.fail("chain has no reasoning carrier last-mile subscriber")
 
 
 class RecordingProvider:
@@ -302,9 +347,15 @@ async def test_translated_responses_wire_keeps_two_reasoning_items_without_separ
     ]
 
 
-async def test_direct_anthropic_driver_never_sends_compatible_synthetic_carrier() -> None:
+@pytest.mark.parametrize("strict", [False, True])
+async def test_direct_anthropic_driver_never_sends_compatible_synthetic_carrier(
+    strict: bool,
+) -> None:
     registry = SubscriberRegistry[RequestContext]()
-    register_builtin_subscribers(registry)
+    register_builtin_subscribers(
+        registry,
+        unportable_reasoning_carrier="refuse" if strict else "degrade",
+    )
     provider = RecordingProvider()
     driver = AnthropicMessagesDriver(provider, registry.freeze(), budget=RetryBudget(max_total=1))
     context = RequestContext(
@@ -331,9 +382,19 @@ async def test_direct_anthropic_driver_never_sends_compatible_synthetic_carrier(
 
     outcome = await driver.run(context)
 
-    assert provider.sent == []
-    assert isinstance(outcome.error, TranslationRefused)
-    assert outcome.error.code == "reasoning_carrier_not_unwrapped"
+    if strict:
+        assert provider.sent == []
+        assert isinstance(outcome.error, TranslationRefused)
+        assert outcome.error.code == "reasoning_carrier_not_unwrapped"
+        assert "conversion_losses" not in context.extras
+    else:
+        assert outcome.error is None
+        assert provider.sent == [
+            {"model": "claude-model", "messages": [{"role": "assistant", "content": []}]}
+        ]
+        assert [loss.code for loss in context.extras["conversion_losses"]] == [
+            LossCode.REASONING_STATE_NOT_PORTABLE
+        ]
 
 
 async def test_the_counting_leg_measures_rather_than_refusing() -> None:

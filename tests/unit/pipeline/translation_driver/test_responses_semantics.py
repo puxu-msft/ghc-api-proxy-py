@@ -148,7 +148,6 @@ def test_response_diagnostics_are_absorbed_on_the_handled_context() -> None:
     )
 
     translated = response_payload(
-        chain,
         handled,
         {
             "id": "resp_unknown",
@@ -156,6 +155,8 @@ def test_response_diagnostics_are_absorbed_on_the_handled_context() -> None:
             "status": "completed",
             "output": [{"type": "future_output_item"}],
         },
+        translators=chain.translators,
+        retry=chain.config.upstream_request_retry,
     )
 
     assert translated["content"] == []

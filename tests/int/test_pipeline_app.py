@@ -3124,7 +3124,7 @@ def test_a_served_request_writes_exactly_one_log_line(request_log: None, caplog:
     lines = _request_lines(caplog.records)
     assert len(lines) == 1
     # A success names the model instead of the route, and carries the status and how long it took.
-    assert lines[0].startswith("H1/H1 200 anthropic-messages/claude-model[none] ")
+    assert lines[0].startswith("H1/H1 200 anthropic-messages/claude-model ")
 
 
 def test_a_token_count_says_it_was_one_and_which_counter_answered(request_log: None, caplog: pytest.LogCaptureFixture) -> None:
@@ -3143,7 +3143,7 @@ def test_a_token_count_says_it_was_one_and_which_counter_answered(request_log: N
     lines = _request_lines(caplog.records)
     assert len(lines) == 1
     # Both legs, because this count really did go upstream, and the counter named because the number is upstream's own measurement.
-    assert lines[0].startswith("H1/H1 200 anthropic-messages-count-tokens/claude-model[none] ")
+    assert lines[0].startswith("H1/H1 200 anthropic-messages-count-tokens/claude-model ")
     assert lines[0].endswith("provider(ghc)")
     # Both directions of that leg. One of them alone would say, by this line's own convention, that nothing came back — from the exchange that produced the number on the line.
     assert re.search(r"[↑>][\d.]+(B|KiB|MiB)\b", lines[0]), "the body sent upstream is what the count was measured on"
@@ -3168,7 +3168,7 @@ def test_a_count_upstream_could_not_answer_is_reported_as_an_estimate(request_lo
     assert response.json()["estimated"] is True
     lines = _request_lines(caplog.records)
     assert len(lines) == 1
-    assert lines[0].startswith("H1 200 anthropic-messages-count-tokens/claude-model[none] ")
+    assert lines[0].startswith("H1 200 anthropic-messages-count-tokens/claude-model ")
     assert "provider(ghc-failed,local)" in lines[0]
 
 
@@ -3190,7 +3190,7 @@ def test_a_count_with_no_upstream_counter_says_that_rather_than_a_failure(reques
     lines = _request_lines(caplog.records)
     assert len(lines) == 1
     # One leg, because nothing was sent, and the reason says that is by design rather than a failure.
-    assert lines[0].startswith("H1 200 anthropic-messages-count-tokens/gpt-model[none] ")
+    assert lines[0].startswith("H1 200 anthropic-messages-count-tokens/gpt-model ")
     assert lines[0].endswith("provider(no-counter,local)")
 
 
@@ -3211,7 +3211,7 @@ def test_a_count_upstream_answered_uselessly_keeps_the_leg_it_flew(request_log: 
     lines = _request_lines(caplog.records)
     assert len(lines) == 1
     # Both legs and both directions, next to the counter that says the number on the line is not upstream's.
-    assert lines[0].startswith("H1/H1 200 anthropic-messages-count-tokens/claude-model[none] ")
+    assert lines[0].startswith("H1/H1 200 anthropic-messages-count-tokens/claude-model ")
     assert "provider(ghc-failed,local)" in lines[0]
     assert re.search(r"[↑>][\d.]+(B|KiB|MiB)\b", lines[0])
     assert re.search(r"[↓<][\d.]+(B|KiB|MiB)\b", lines[0])
@@ -3876,7 +3876,7 @@ def test_a_streaming_request_reports_what_it_received_from_upstream(request_log:
 
     lines = _request_lines(caplog.records)
     assert len(lines) == 1
-    assert lines[0].startswith("H1/H1 200 anthropic-messages/claude-model[none] ")
+    assert lines[0].startswith("H1/H1 200 anthropic-messages/claude-model ")
     assert "↓" in lines[0], "a streamed upstream response must report its received body bytes"
     assert "↓0B" not in lines[0]
 
@@ -3930,7 +3930,13 @@ def test_one_shot_accounting_reports_how_delivery_actually_ended(
         request_id="req-one-shot",
         started=time.monotonic(),
     )
-    completion = RequestCompletionCoordinator(chain, trace, trace.request_id)
+    completion = RequestCompletionCoordinator(
+        active_requests=chain.active_requests,
+        history_writer=chain.history_writer,
+        capabilities=chain.capabilities,
+        trace=trace,
+        request_id=trace.request_id,
+    )
     accounting = _StreamAccounting(
         chain=chain,
         request_id=trace.request_id,
@@ -3977,7 +3983,13 @@ async def test_a_client_deadline_is_accounted_as_the_failure_its_frame_reports(
         started=time.monotonic(),
     )
     assembler = AnthropicAssembler()
-    completion = RequestCompletionCoordinator(chain, trace, trace.request_id)
+    completion = RequestCompletionCoordinator(
+        active_requests=chain.active_requests,
+        history_writer=chain.history_writer,
+        capabilities=chain.capabilities,
+        trace=trace,
+        request_id=trace.request_id,
+    )
     accounting = _StreamAccounting(
         chain=chain,
         request_id=trace.request_id,
@@ -3996,8 +4008,8 @@ async def test_a_client_deadline_is_accounted_as_the_failure_its_frame_reports(
         delivering(
             deadline_after_one_block(),
             assembler,
-            buffer=delivery_buffer(chain),
-            settings=stream_settings(chain),
+            buffer=delivery_buffer(chain.config.client_delivery),
+            settings=stream_settings(chain.config.client_delivery),
             framer=AnthropicFramer(message_id="msg_1", model="claude-model"),
         ),
         accounting,
@@ -4059,7 +4071,13 @@ async def test_an_upstream_that_tore_says_so_and_says_what_broke(
     chain = _chain_of(client)
     trace = RequestTrace(method="POST", path="/v1/messages", request_id="req_1", started=time.monotonic())
     assembler = AnthropicAssembler()
-    completion = RequestCompletionCoordinator(chain, trace, trace.request_id)
+    completion = RequestCompletionCoordinator(
+        active_requests=chain.active_requests,
+        history_writer=chain.history_writer,
+        capabilities=chain.capabilities,
+        trace=trace,
+        request_id=trace.request_id,
+    )
     accounting = _StreamAccounting(
         chain=chain, request_id="req_1", trace=trace, completion=completion, status_code=200, assembler=assembler
     )
@@ -4075,8 +4093,8 @@ async def test_an_upstream_that_tore_says_so_and_says_what_broke(
         delivering(
             tears_after_the_first_block(),
             assembler,
-            buffer=delivery_buffer(chain),
-            settings=stream_settings(chain),
+            buffer=delivery_buffer(chain.config.client_delivery),
+            settings=stream_settings(chain.config.client_delivery),
             framer=AnthropicFramer(message_id="msg_1", model="claude-model"),
         ),
         accounting,
@@ -4113,7 +4131,13 @@ async def test_a_tear_after_the_stop_reason_is_still_a_tear(
     chain = _chain_of(client)
     trace = RequestTrace(method="POST", path="/v1/messages", request_id="req_1", started=time.monotonic())
     assembler = AnthropicAssembler()
-    completion = RequestCompletionCoordinator(chain, trace, trace.request_id)
+    completion = RequestCompletionCoordinator(
+        active_requests=chain.active_requests,
+        history_writer=chain.history_writer,
+        capabilities=chain.capabilities,
+        trace=trace,
+        request_id=trace.request_id,
+    )
     accounting = _StreamAccounting(
         chain=chain, request_id="req_1", trace=trace, completion=completion, status_code=200, assembler=assembler
     )
@@ -4129,8 +4153,8 @@ async def test_a_tear_after_the_stop_reason_is_still_a_tear(
         delivering(
             tears_after_its_stop_reason(),
             assembler,
-            buffer=delivery_buffer(chain),
-            settings=stream_settings(chain),
+            buffer=delivery_buffer(chain.config.client_delivery),
+            settings=stream_settings(chain.config.client_delivery),
             framer=AnthropicFramer(message_id="msg_1", model="claude-model"),
         ),
         accounting,
@@ -4188,7 +4212,13 @@ async def test_a_client_that_walked_away_is_not_blamed_on_upstream(
     chain = _chain_of(client)
     trace = RequestTrace(method="POST", path="/v1/messages", request_id="req_1", started=time.monotonic())
     assembler = AnthropicAssembler()
-    completion = RequestCompletionCoordinator(chain, trace, trace.request_id)
+    completion = RequestCompletionCoordinator(
+        active_requests=chain.active_requests,
+        history_writer=chain.history_writer,
+        capabilities=chain.capabilities,
+        trace=trace,
+        request_id=trace.request_id,
+    )
     accounting = _StreamAccounting(
         chain=chain, request_id="req_1", trace=trace, completion=completion, status_code=200, assembler=assembler
     )
@@ -4205,8 +4235,8 @@ async def test_a_client_that_walked_away_is_not_blamed_on_upstream(
         delivering(
             still_sending(),
             assembler,
-            buffer=delivery_buffer(chain),
-            settings=stream_settings(chain),
+            buffer=delivery_buffer(chain.config.client_delivery),
+            settings=stream_settings(chain.config.client_delivery),
             framer=AnthropicFramer(message_id="msg_1", model="claude-model"),
         ),
         accounting,
@@ -4263,7 +4293,13 @@ async def test_a_native_terminal_is_complete_only_after_its_send_returns(
         started=time.monotonic(),
     )
     assembler = responses_passthrough_assembler()
-    completion = RequestCompletionCoordinator(chain, trace, trace.request_id)
+    completion = RequestCompletionCoordinator(
+        active_requests=chain.active_requests,
+        history_writer=chain.history_writer,
+        capabilities=chain.capabilities,
+        trace=trace,
+        request_id=trace.request_id,
+    )
     accounting = _StreamAccounting(
         chain=chain,
         request_id=trace.request_id,
@@ -4297,8 +4333,8 @@ async def test_a_native_terminal_is_complete_only_after_its_send_returns(
             upstream,
             assembler,
             upstream=upstream,
-            buffer=cast(BlockBuffer[Any], delivery_buffer(chain)),
-            settings=stream_settings(chain),
+            buffer=cast(BlockBuffer[Any], delivery_buffer(chain.config.client_delivery)),
+            settings=stream_settings(chain.config.client_delivery),
             framer=framer,
             passthrough=True,
         ),
@@ -4425,7 +4461,13 @@ async def test_a_terminal_marker_stays_with_its_chunk_when_buffering_releases_mu
         started=time.monotonic(),
     )
     assembler = responses_passthrough_assembler()
-    completion = RequestCompletionCoordinator(chain, trace, trace.request_id)
+    completion = RequestCompletionCoordinator(
+        active_requests=chain.active_requests,
+        history_writer=chain.history_writer,
+        capabilities=chain.capabilities,
+        trace=trace,
+        request_id=trace.request_id,
+    )
     accounting = _StreamAccounting(
         chain=chain,
         request_id=trace.request_id,
@@ -4449,7 +4491,7 @@ async def test_a_terminal_marker_stays_with_its_chunk_when_buffering_releases_mu
                 BlockBuffer[Any],
                 BlockBuffer(policy="until-tool-use"),
             ),
-            settings=stream_settings(chain),
+            settings=stream_settings(chain.config.client_delivery),
             framer=framer,
             passthrough=True,
         ),
@@ -5119,7 +5161,7 @@ def test_the_count_endpoint_reports_its_model_and_its_number(request_log: None, 
         client.post("/v1/messages/count_tokens", json={"model": "alias", "messages": [{"role": "user", "content": "hi"}]})
 
     line = _request_lines(caplog.records)[0]
-    assert "alias → ghc/claude-model[none]" in line
+    assert "alias → ghc/claude-model" in line
     assert "↑4.2k" in line
 
 
@@ -6156,7 +6198,7 @@ def test_a_direct_buffered_responses_reply_is_observed_before_translation(
         client.post("/responses", json={"model": "gpt-model", "input": []})
 
     line = _request_lines(caplog.records)[0]
-    assert line.startswith("H1/H1 200 openai-responses/gpt-model[none] ")
+    assert line.startswith("H1/H1 200 openai-responses/gpt-model ")
     assert "completed reason(enc:1) function_call(Bash)" in line
     assert line.count("reason(enc:1)") == 1
     assert "end_turn" not in line and "tool_use" not in line
@@ -8244,7 +8286,7 @@ def test_a_replacement_that_never_opened_an_attempt_is_not_recorded_as_one(
         # Before the replay driver exists, let alone `begin_attempt`.
         raise RuntimeError("the replay could not open its prepared driver")
 
-    monkeypatch.setattr(inference_route, "replay_prepared", fail_before_attempt)
+    monkeypatch.setattr(driver, "replay_prepared", fail_before_attempt)
 
     client, _ = make_client(upstream)
     with contextlib.suppress(Exception):
@@ -8920,7 +8962,13 @@ async def test_reported_upstream_failure_does_not_hide_a_distinct_cleanup_failur
     chain = _chain_of(client)
     trace = RequestTrace(method="POST", path="/v1/messages", request_id="req_1", started=time.monotonic())
     assembler = AnthropicAssembler()
-    completion = RequestCompletionCoordinator(chain, trace, trace.request_id)
+    completion = RequestCompletionCoordinator(
+        active_requests=chain.active_requests,
+        history_writer=chain.history_writer,
+        capabilities=chain.capabilities,
+        trace=trace,
+        request_id=trace.request_id,
+    )
     accounting = _StreamAccounting(
         chain=chain,
         request_id=trace.request_id,
@@ -8942,8 +8990,8 @@ async def test_reported_upstream_failure_does_not_hide_a_distinct_cleanup_failur
             ),
             assembler,
             upstream=upstream,
-            buffer=delivery_buffer(chain),
-            settings=stream_settings(chain),
+            buffer=delivery_buffer(chain.config.client_delivery),
+            settings=stream_settings(chain.config.client_delivery),
             framer=AnthropicFramer(message_id="msg_1", model="claude-model"),
             on_runtime_failure=accounting.note_runtime_failure,
         ),

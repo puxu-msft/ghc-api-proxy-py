@@ -1,9 +1,12 @@
+import json
+import sqlite3
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
 import pytest
 
+import app.tokenization.learning_store as learning_store_module
 import app.tokenization.worker as worker_module
 from app.model_provider import ModelDescriptor, ModelEndpoint
 from app.pipeline.request import WireFormat
@@ -134,3 +137,68 @@ async def test_learning_service_selects_exact_history_for_a_repeated_count(
     assert selected.method.value == "history-exact"
     assert selected.unscaled_tokens == 42
     await service.close()
+
+
+@pytest.mark.asyncio
+async def test_learning_service_persists_large_prefix_chain(
+    tmp_path: Path,
+    inline_token_worker: None,
+) -> None:
+    payload = {
+        "model": "gpt-model",
+        "input": [
+            {"type": "message", "role": "user", "content": "hello"}
+            for _ in range(1_000)
+        ],
+    }
+    body = json.dumps(payload, separators=(",", ":")).encode()
+    descriptor = ModelDescriptor(
+        id="gpt-model",
+        endpoints=frozenset({ModelEndpoint.OPENAI_RESPONSES}),
+        provider_name="ghc",
+    )
+    store_path = tmp_path / "learning.sqlite3"
+    service = TokenLearningService(
+        LocalTokenWorker(),
+        store=TokenLearningStore(store_path),
+    )
+
+    await service.start()
+    assert service.offer(
+        request_id="oversized-prefix",
+        attempt_index=0,
+        body=body,
+        actual_input_tokens=42,
+        provider_name="ghc",
+        resolved_model="gpt-model",
+        endpoint=ModelEndpoint.OPENAI_RESPONSES,
+        target_format=WireFormat.OPENAI_RESPONSES,
+        descriptor=descriptor,
+    )
+    await service.close()
+
+    connection = sqlite3.connect(store_path)
+    try:
+        assert connection.execute("SELECT COUNT(*) FROM samples").fetchone() == (1,)
+        assert connection.execute(
+            """
+            SELECT outcome, reason_code, metadata_json
+            FROM learning_events
+            WHERE request_id = ?
+            """,
+            ("oversized-prefix",),
+        ).fetchone() == (
+            "committed",
+            "sample-committed",
+            '{"actual_input_tokens":42}',
+        )
+    finally:
+        connection.close()
+
+
+def test_learning_store_keeps_a_bounded_json_limit() -> None:
+    with pytest.raises(ValueError, match="1048576-byte storage limit"):
+        learning_store_module._encode_json(  # pyright: ignore[reportPrivateUsage]
+            ["0" * 64] * 16_000,
+            "prefix fingerprints",
+        )

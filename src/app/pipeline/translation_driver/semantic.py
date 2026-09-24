@@ -130,6 +130,9 @@ class Loss:
         return f"{self.code.value}: {self.detail}" if self.detail else self.code.value
 
 
+NONPORTABLE_REASONING_REQUEST_DETAIL = "nonportable reasoning was omitted from this request"
+
+
 @dataclass(slots=True)
 class Conversion:
     """The losses and non-loss facts owned by one translation.
@@ -145,6 +148,13 @@ class Conversion:
 
     def record(self, code: LossCode, detail: str = "") -> None:
         self.losses.append(Loss(code, detail))
+
+    def record_nonportable_reasoning(self) -> None:
+        if not self.has(LossCode.REASONING_STATE_NOT_PORTABLE):
+            self.record(
+                LossCode.REASONING_STATE_NOT_PORTABLE,
+                NONPORTABLE_REASONING_REQUEST_DETAIL,
+            )
 
     def observe(self, code: ConversionFactCode, detail: str = "") -> None:
         self.facts.append(ConversionFact(code, detail))

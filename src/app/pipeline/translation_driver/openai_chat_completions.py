@@ -463,10 +463,7 @@ def _chat_messages(
                 # Reasoning history has no portable spelling here: its opaque state
                 # belongs to the wire that issued it, and the readable text is the
                 # model's own scratch work, not a turn a client resubmits.
-                conversion.record(
-                    LossCode.REASONING_STATE_NOT_PORTABLE,
-                    "reasoning block dropped crossing to Chat Completions",
-                )
+                conversion.record_nonportable_reasoning()
             else:
                 conversion.record(
                     LossCode.BLOCK_NOT_CARRIED, f"{block.kind.value} block in an assistant turn"

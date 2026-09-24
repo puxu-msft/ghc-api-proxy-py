@@ -14,18 +14,26 @@ from uuid import uuid4
 from app.model_provider.types import ModelDescriptor, ModelEndpoint
 from app.pipeline.request import WireFormat
 from app.tokenization.features import TOKENIZER_NAME
-from app.tokenization.learning_store import TokenLearningStore
+from app.tokenization.learning_store import (
+    LearningStoreStorageLimitError,
+    TokenLearningStore,
+)
 from app.tokenization.prediction import (
     build_prediction_record,
     evaluate,
     predict_exact_or_prefix,
 )
 from app.tokenization.types import (
+    AnalysisFailedMetadata,
+    AnalysisFailureStage,
     LearningIdentity,
+    LearningReasonCode,
     LearningSnapshot,
     LearningUpdate,
     NoPrefixCheckpointChange,
+    PrefixCheckpointNotCommitted,
     StoredSample,
+    TokenLearningObservation,
     TokenPrediction,
 )
 from app.wire_json import dumps, loads
@@ -297,7 +305,35 @@ class TokenLearningService:
                 prefix_checkpoint_command=NoPrefixCheckpointChange(),
             )
 
-        result = await self._store.apply_sample(analyzed_sample, transition)
+        try:
+            result = await self._store.apply_sample(analyzed_sample, transition)
+        except LearningStoreStorageLimitError as error:
+            failure = TokenLearningObservation(
+                sample_key=sample_key,
+                outcome="failed",
+                reason_code=LearningReasonCode.ANALYSIS_FAILED,
+                metadata=AnalysisFailedMetadata(AnalysisFailureStage.PERSISTENCE),
+                prefix_checkpoint_outcome=PrefixCheckpointNotCommitted(),
+            )
+            try:
+                await self._store.record_event(failure, identity)
+            except Exception:
+                logger.exception(
+                    "token learning persistence failure event failed: provider=%s model=%s attempt=%d",
+                    offer.provider_name,
+                    offer.resolved_model,
+                    offer.attempt_index,
+                )
+            else:
+                logger.warning(
+                    "token learning sample skipped by storage limit: provider=%s model=%s "
+                    "attempt=%d detail=%s",
+                    offer.provider_name,
+                    offer.resolved_model,
+                    offer.attempt_index,
+                    error,
+                )
+            return
         logger.debug(
             "token learning sample %s: %s",
             result.observation.sample_key,

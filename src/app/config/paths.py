@@ -1,10 +1,52 @@
 import os
+import re
+from importlib import resources
 from pathlib import Path
 
 from platformdirs import user_config_path as platform_user_config_path
 from platformdirs import user_data_path as platform_user_data_path
 
 APP_NAME = "ghc-api-proxy"
+
+# The name a configured path may use for the installed package itself. A uvx run
+# has no checkout, so `contrib/` does not exist for it — while a file inside the
+# package ships in the wheel and resolves through `importlib.resources` however the
+# distribution was installed. It is substituted before anything else reads the text,
+# so it composes with the `${VAR:-fallback}` pass and with `~` below.
+PACKAGE_DIR_VARIABLE = "GHC_PACKAGE_DIR"
+_PACKAGE_DIR_SPELLINGS = (
+    f"${PACKAGE_DIR_VARIABLE}",
+    "${" + PACKAGE_DIR_VARIABLE + "}",
+)
+
+
+def package_dir() -> Path:
+    """Where the installed `app` package lives.
+
+    One fact with one source: `importlib.resources` answers it for an editable
+    install and for an isolated uvx cache alike, so there is deliberately no
+    environment-variable override for this name.
+    """
+    return Path(str(resources.files("app")))
+
+# A shell's `${VAR:-fallback}`, which `os.path.expandvars` does not know: it treats
+# `VAR:-fallback` as a variable name that is never set and leaves the whole token in
+# the path. Writing a fallback is the entire point of the form — the file it names
+# lives at a location the variable may not carry yet on the machine reading it.
+_DEFAULTED_VARIABLE = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*):-([^}]*)\}")
+
+
+def _apply_shell_defaults(text: str) -> str:
+    def replace(match: re.Match[str]) -> str:
+        name, fallback = match.group(1), match.group(2)
+        value = os.environ.get(name)
+        if value:
+            return value
+        # The fallback is expanded here rather than left to `expanduser` below, which
+        # only ever sees the first character of the result.
+        return str(Path(fallback).expanduser()) if fallback.startswith("~") else fallback
+
+    return _DEFAULTED_VARIABLE.sub(replace, text)
 
 
 def user_config_path() -> Path:
@@ -70,10 +112,14 @@ def expand_user_path(value: str) -> Path:
 
     The spec spells locations as `$XDG_DATA_HOME/...`, and that variable is usually unset.
     `os.path.expandvars` would leave it as a literal directory name, so platformdirs resolves it.
-    `~` and other variables expand normally.
+    `~` and other variables expand normally, and a `${VAR:-fallback}` picks the fallback when the
+    variable is unset or empty. `${GHC_PACKAGE_DIR}` names the installed package itself and is
+    substituted first, from `importlib.resources` rather than the environment.
     """
     text = value.strip()
+    for spelling in _PACKAGE_DIR_SPELLINGS:
+        text = text.replace(spelling, str(package_dir()))
     for spelling in ("$XDG_DATA_HOME/ghc-api-proxy", "${XDG_DATA_HOME}/ghc-api-proxy"):
         if text.startswith(spelling) and "XDG_DATA_HOME" not in os.environ:
             return user_data_path() / text[len(spelling) :].lstrip("/")
-    return Path(os.path.expandvars(text)).expanduser()
+    return Path(os.path.expandvars(_apply_shell_defaults(text))).expanduser()

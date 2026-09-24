@@ -13,6 +13,10 @@ import httpx2
 import orjson
 
 from app.config.schema import CommandCodeProviderConfig
+from app.model_provider.commandcode.fingerprint import (
+    FingerprintSnapshotError,
+    FingerprintSnapshotStore,
+)
 from app.model_provider.http_errors import upstream_error_from_response
 from app.model_provider.upstream_errors import (
     normalize_upstream_cleanup_error,
@@ -179,7 +183,7 @@ class CommandCodeClient:
         self._http = http_client
         self._config = config
         self._base_url = config.api_base_url.rstrip("/")
-        self._fingerprint = _fingerprint()
+        self._fingerprint = self._load_fingerprint()
         self._default_session_id = str(uuid4())
         self._initialization_lock = asyncio.Lock()
         self._next_initialization_at = 0.0
@@ -187,6 +191,19 @@ class CommandCodeClient:
     @property
     def base_url(self) -> str:
         return self._base_url
+
+    def _load_fingerprint(self) -> dict[str, Any] | None:
+        if self._config.fingerprint_mode == "off":
+            return None
+        if self._config.fingerprint_mode == "generated":
+            return _fingerprint()
+        try:
+            return FingerprintSnapshotStore(
+                self._config.fingerprint_snapshot_file
+            ).load(self._config.api_key)
+        except FingerprintSnapshotError as error:
+            logger.warning("Command Code fingerprint snapshot unavailable: %s", error)
+            return None
 
     def _headers(
         self,
@@ -458,8 +475,7 @@ class CommandCodeClient:
             now = time.monotonic()
             if now < self._next_initialization_at:
                 return
-            initialized = await asyncio.gather(
-                self._post_lifecycle(FINGERPRINT_PATH, self._fingerprint),
+            initializers = [
                 self._post_lifecycle(
                     LIFECYCLE_PATH,
                     {
@@ -471,8 +487,14 @@ class CommandCodeClient:
                             "os": "linux-x64",
                         },
                     },
-                ),
-            )
+                )
+            ]
+            if self._fingerprint is not None:
+                initializers.insert(
+                    0,
+                    self._post_lifecycle(FINGERPRINT_PATH, self._fingerprint),
+                )
+            initialized = await asyncio.gather(*initializers)
             if all(initialized):
                 self._next_initialization_at = time.monotonic() + 8 * 60 * 60
             else:

@@ -8,7 +8,11 @@ Split out of `app.server.handler` on 2026-08-22. Above `app.pipeline.delivery`, 
 from collections.abc import Callable
 from typing import Any
 
-from app.core.chain import Chain
+from app.config.schema import (
+    ClientDeliveryConfig,
+    ProxyConfig,
+    UpstreamRequestTimeoutsConfig,
+)
 from app.pipeline.delivery import BlockBuffer
 from app.pipeline.delivery.assembling import BlockAssembler, ReplyDialect
 from app.pipeline.delivery.formats.anthropic_messages import (
@@ -88,7 +92,7 @@ def carries_upstream_natively(handled: HandledRequest) -> bool:
 
 def framer_for(
     handled: HandledRequest,
-    chain: Chain,
+    config: ProxyConfig,
     *,
     message_id: str,
     model: str,
@@ -114,9 +118,7 @@ def framer_for(
         if not carries_upstream_natively(handled):
             return native
         # Read here rather than carried in on a delivery setting, for the reason its Anthropic sibling below gives: which ids a Responses client can group by is a fact about that wire format. `None` when the switch is off, so the framer forwards upstream's bytes untouched and the reshape cannot become an unnamed default (`direct-passthrough/spec.md` §6.6).
-        reshape = (
-            stabilise_stream_ids if chain.config.hook_fix_responses_sse.fix_stream_ids else None
-        )
+        reshape = stabilise_stream_ids if config.hook_fix_responses_sse.fix_stream_ids else None
         return PassthroughFramer(
             delegate=native,
             reshape=reshape,
@@ -132,7 +134,7 @@ def framer_for(
         model=model,
         # Read here rather than carried in on a delivery setting. It says how a thinking block's signature is spelled, which is a fact about the Anthropic wire format and therefore the
         # Anthropic framer's business; routing it through `StreamSettings` put a framing knob in the one object that is meant to name no format at all.
-        signature_compat=chain.config.hook_fix_anthropic_sse.thinking.content_block_start_compat,
+        signature_compat=config.hook_fix_anthropic_sse.thinking.content_block_start_compat,
     )
 
 def assembler_for(
@@ -164,23 +166,21 @@ def assembler_for(
         return CommandCodeAssembler()
     return AnthropicAssembler()
 
-def stream_settings(chain: Chain) -> StreamSettings:
-    delivery = chain.config.client_delivery
+def stream_settings(delivery: ClientDeliveryConfig) -> StreamSettings:
     return StreamSettings(
         sse_ping_interval=delivery.sse_ping_interval,
         unterminated_stop_reason=delivery.unterminated_stream_stop_reason,
     )
 
-def delivery_buffer(chain: Chain) -> BlockBuffer:
-    delivery = chain.config.client_delivery
+def delivery_buffer(delivery: ClientDeliveryConfig) -> BlockBuffer:
     return BlockBuffer(
         policy=delivery.buffering_policy,
         cap_bytes=delivery.buffer_cap_bytes,
     )
 
-def stream_idle_seconds(chain: Chain) -> int:
+def stream_idle_seconds(timeouts: UpstreamRequestTimeoutsConfig) -> int:
     """How long upstream may go quiet mid-stream before the attempt is given up on.
 
     0 disables it, and 0 is the bundled default. The frozen invariant is never to false-kill legitimate thinking — silence on a live connection has no provably safe bound, so an operator setting this is choosing bounded waiting rather than accepting a default.
     """
-    return chain.config.upstream_request_timeouts.stream_idle
+    return timeouts.stream_idle

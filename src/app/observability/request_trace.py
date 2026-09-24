@@ -9,7 +9,6 @@ import time
 from dataclasses import dataclass, field, replace
 from typing import Any, cast
 
-from app.core.chain import Chain
 from app.observability.logging import get_logger
 from app.observability.metrics import TRANSLATION_LOSSES
 from app.observability.request_log import (
@@ -20,6 +19,7 @@ from app.observability.request_log import (
     status_for,
 )
 from app.observability.request_log_file import write_request_record
+from app.observability.terminal import TerminalCapabilities
 from app.pipeline.delivery.assembling import ClientAction, ReplyDialect, Terminal
 from app.pipeline.request import RequestContext
 from app.pipeline.response_action import ClientActionRequirement
@@ -583,11 +583,11 @@ def request_line_from_trace(
 
 
 def log_completion(
-    chain: Chain,
     trace: RequestTrace,
     status_code: int | None,
     *,
     upstream_response_body_bytes: int | None,
+    capabilities: TerminalCapabilities,
 ) -> None:
     """Write the one line that says this request happened.
 
@@ -612,8 +612,8 @@ def log_completion(
         format_completion_line(
             line,
             status=status,
-            unicode=chain.capabilities.unicode,
-            color=chain.capabilities.color,
+            unicode=capabilities.unicode,
+            color=capabilities.color,
             response_observation=trace.response_observation,
             retry_as_success=status == "retry" and trace.status_override is None,
         ),

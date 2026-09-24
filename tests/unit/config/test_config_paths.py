@@ -10,7 +10,13 @@ from pathlib import Path
 import httpx2
 import pytest
 
-from app.config.paths import expand_user_path, standalone_pidfile_path, user_data_path
+from app.config.paths import (
+    PACKAGE_DIR_VARIABLE,
+    expand_user_path,
+    package_dir,
+    standalone_pidfile_path,
+    user_data_path,
+)
 from app.config.schema import ProxyConfig
 from app.model_provider.ghc.auth.providers import FileTokenProvider
 from app.server.composition import build_chain, github_token_path
@@ -44,6 +50,81 @@ def test_a_plain_absolute_path_is_left_alone() -> None:
 
 def test_a_home_relative_path_expands() -> None:
     assert expand_user_path("~/token") == Path.home() / "token"
+
+
+def test_a_fallback_carries_a_path_the_variable_does_not_yet_hold(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`${VAR:-fallback}` is a shell form, and `os.path.expandvars` is not a shell.
+
+    It reads `VAR:-fallback` as one variable name, finds no such variable, and leaves the
+    token in the path — producing a directory literally named `${GHC_MODEL_INFO:-/tmp}`.
+    A configured file would then be missing at a location nobody wrote and nothing would
+    name the spelling that caused it.
+    """
+    monkeypatch.delenv("MODEL_INFO_HOME", raising=False)
+    assert expand_user_path("${MODEL_INFO_HOME:-/srv/models}/opencode-go.json") == Path(
+        "/srv/models/opencode-go.json"
+    )
+
+
+def test_a_set_variable_wins_over_its_fallback(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("MODEL_INFO_HOME", "/from/env")
+    assert expand_user_path("${MODEL_INFO_HOME:-/srv/models}/opencode-go.json") == Path(
+        "/from/env/opencode-go.json"
+    )
+
+
+def test_an_empty_variable_takes_the_fallback(monkeypatch: pytest.MonkeyPatch) -> None:
+    # `:-` rather than `-`: an exported but empty variable is the common shape of "nobody set this".
+    monkeypatch.setenv("MODEL_INFO_HOME", "")
+    assert expand_user_path("${MODEL_INFO_HOME:-/srv/models}/opencode-go.json") == Path(
+        "/srv/models/opencode-go.json"
+    )
+
+
+def test_a_fallback_may_be_home_relative(monkeypatch: pytest.MonkeyPatch) -> None:
+    # `expanduser` only looks at the front of the string, and this fallback is not at the front.
+    monkeypatch.delenv("MODEL_INFO_HOME", raising=False)
+    assert expand_user_path("${MODEL_INFO_HOME:-~/models}/opencode-go.json") == (
+        Path.home() / "models/opencode-go.json"
+    )
+
+
+def test_a_variable_without_a_fallback_keeps_the_expandvars_behaviour(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Only the fallback form is new here. An unset plain `${VAR}` still surfaces as written instead of quietly collapsing to the root.
+    monkeypatch.delenv("MODEL_INFO_HOME", raising=False)
+    assert "${MODEL_INFO_HOME}" in str(expand_user_path("${MODEL_INFO_HOME}/x.json"))
+
+
+def test_the_package_dir_names_the_installed_package_itself(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`${GHC_PACKAGE_DIR}` is resolved from the install, not the environment.
+
+    A uvx run has no checkout, so `contrib/` does not exist for it — while a file
+    inside the package ships in the wheel, and the variable lets a config point at it
+    without copying it somewhere first.
+    """
+    monkeypatch.delenv(PACKAGE_DIR_VARIABLE, raising=False)
+    monkeypatch.setenv("HOME", "/nowhere")
+
+    resolved = expand_user_path(
+        "${" + PACKAGE_DIR_VARIABLE + "}/model_provider/opencode-go-20260916.json"
+    )
+
+    assert resolved == package_dir() / "model_provider" / "opencode-go-20260916.json"
+    assert resolved.is_file()
+
+
+def test_the_package_dir_plain_spelling_resolves_the_same_way() -> None:
+    assert expand_user_path(
+        f"${PACKAGE_DIR_VARIABLE}/model_provider/opencode-go-20260916.json"
+    ) == expand_user_path(
+        "${" + PACKAGE_DIR_VARIABLE + "}/model_provider/opencode-go-20260916.json"
+    )
 
 
 def test_the_configured_token_file_reaches_the_file_provider(

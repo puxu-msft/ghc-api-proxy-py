@@ -164,6 +164,12 @@ async def status(request: Request) -> JSONResponse:
             "catalog": "ok" if available or disabled else "empty",
             "catalog_refreshed_at": provider.catalog_refreshed_at or None,
         }
+        # Only a bridge can carry one. Reported here rather than only logged because a
+        # stale sample and a current one produce the same catalog, and the operator
+        # reading this document is the one who can act on the difference.
+        model_info = getattr(provider, "model_info_freshness", None)
+        if model_info is not None:
+            providers[name]["model_info"] = model_info
 
     routes: dict[str, Any] = {}
     for row in route_table(providers=chain.providers, mappings=chain.config.model_mappings):
@@ -235,6 +241,13 @@ def _model_entries(chain: Chain, *, provider_name: str | None = None) -> list[di
             continue
         provider = chain.providers.get(row.provider)
         entry = _upstream_metadata(provider, row.model)
+        descriptor = provider.describe(row.model)
+        if descriptor is not None and descriptor.reasoning_efforts is not None:
+            capabilities = dict(_string_mapping(entry.get("capabilities")))
+            supports = dict(_string_mapping(capabilities.get("supports")))
+            supports["reasoning_effort"] = list(descriptor.reasoning_efforts)
+            capabilities["supports"] = supports
+            entry["capabilities"] = capabilities
         entry.update({"id": row.name, "object": "model", "owned_by": row.provider})
         provider_config = chain.config.model_providers.get(row.provider)
         if isinstance(provider_config, GithubCopilotProviderConfig):

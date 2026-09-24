@@ -227,14 +227,7 @@ def _message_content(
             if reasoning is None:
                 continue
             if reasoning.state is not None:
-                detail = (
-                    "Command Code cannot carry "
-                    f"{reasoning.state.format.value} reasoning state"
-                )
-                request.conversion.record(
-                    LossCode.REASONING_STATE_NOT_PORTABLE,
-                    detail,
-                )
+                request.conversion.record_nonportable_reasoning()
                 if not reasoning.visible_text:
                     field_path = (
                         "input.reasoning.encrypted_content"

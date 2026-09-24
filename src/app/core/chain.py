@@ -4,6 +4,8 @@ Here rather than beside the code that builds it, and that separation is the poin
 
 (Two numbers from the same day, 81 and 104, appear in the session's own record and in `.dev/docs/server-layout/`. They are the same measurement taken before the move, when neither `app.core` nor `app.core.chain` existed to be counted. 83 and 106 are what a reader can reproduce today, with `.dev/docs/server-layout/probes/reach.py`.)
 
+(Remeasured 2026-09-16: importing this module now brings **117**. The 83 rotted as the packages it holds grew, not because anything re-coupled to it — and since that same day nothing under `app.pipeline`, `app.observability` or `app.tokenization` imports this module at all, which `tests/architecture/test_module_boundaries.py` now asserts. The count above is what the record costs, not what the request path pays to name it.)
+
 It is not a leaf, and saying so is more useful than pretending: `TranslatorRegistry`, `FrozenSubscribers[RequestContext]` and `RateLimiter` are pipeline types, so 25 `app.pipeline` modules come with the record no matter where it lives. Making *that* number smaller is a different question — whether a driver should take a `Chain` at all, or read typed facts — and it is registered in `.dev/docs/server-layout/`, not answered here.
 
 `core` is where it goes because this package already states the rule: facts shared across domains, owned by none of them. A record that `server`, `pipeline` and `debug` all read cannot live inside any one of them without making that one a dependency of the others.

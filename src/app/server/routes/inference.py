@@ -137,7 +137,9 @@ async def serve(request: Request) -> Response:
 
     chain.active_requests.add(trace.request_id)
     completion = RequestCompletionCoordinator(
-        chain=chain,
+        active_requests=chain.active_requests,
+        history_writer=chain.history_writer,
+        capabilities=chain.capabilities,
         trace=trace,
         request_id=trace.request_id,
     )
@@ -166,8 +168,8 @@ async def serve(request: Request) -> Response:
     return _AccountedResponse(response, completion)
 
 
-def _reasoning_effort(context: RequestContext) -> str:
-    """Read the named effort from the provider-bound request body."""
+def _reasoning_effort(context: RequestContext) -> str | None:
+    """Read an explicitly carried effort from the provider-bound request body."""
     payload = context.payload
     if context.target_format is WireFormat.OPENAI_RESPONSES:
         reasoning = payload.get("reasoning")
@@ -175,7 +177,16 @@ def _reasoning_effort(context: RequestContext) -> str:
             effort = cast(Mapping[str, Any], reasoning).get("effort")
             if isinstance(effort, str) and effort:
                 return effort
-        return "none"
+        return None
+    if context.target_format is WireFormat.OPENAI_CHAT_COMPLETIONS:
+        effort = payload.get("reasoning_effort")
+        return effort if isinstance(effort, str) and effort else None
+    if context.target_format is WireFormat.COMMANDCODE:
+        params = payload.get("params")
+        if isinstance(params, Mapping):
+            effort = cast(Mapping[str, Any], params).get("reasoning_effort")
+            return effort if isinstance(effort, str) and effort else None
+        return None
     if context.target_format is WireFormat.ANTHROPIC_MESSAGES:
         thinking = payload.get("thinking")
         if (
@@ -188,7 +199,7 @@ def _reasoning_effort(context: RequestContext) -> str:
             effort = cast(Mapping[str, Any], output_config).get("effort")
             if isinstance(effort, str) and effort:
                 return effort
-    return "none"
+    return None
 
 
 def _aborted(failure: BaseException) -> tuple[LogStatus, str]:
@@ -737,7 +748,7 @@ async def _dispatch_after_body(
 
     def _provider_bound(prepared: RequestContext) -> None:
         trace.reasoning_effort = _reasoning_effort(prepared)
-        active.set_effort(trace.request_id, trace.reasoning_effort)
+        active.set_effort(trace.request_id, trace.reasoning_effort or "none")
 
     context.extras[PROVIDER_BOUND_OBSERVER] = _provider_bound
 
@@ -807,7 +818,7 @@ async def _dispatch_after_body(
             # Routing runs inside the handler, so a failure after it has a resolved model worth naming; before it, this is still empty and the field drops out.
             trace.model = context.resolved_model
             trace.reasoning_effort = _reasoning_effort(context)
-            active.set_effort(trace.request_id, trace.reasoning_effort)
+            active.set_effort(trace.request_id, trace.reasoning_effort or "none")
             trace.attempts = context.attempt_count
             trace.absorb_buffered_upstream_attempts(context)
             active.set_attempts(
@@ -842,7 +853,7 @@ async def _dispatch_after_body(
             ),
         )
         trace.reasoning_effort = _reasoning_effort(context)
-        active.set_effort(trace.request_id, trace.reasoning_effort)
+        active.set_effort(trace.request_id, trace.reasoning_effort or "none")
         tokens = counted.get("input_tokens")
         if isinstance(tokens, int):
             trace.usage = {"input_tokens": tokens}
@@ -870,7 +881,7 @@ async def _dispatch_after_body(
         _observe_failed_upstream_response(context, trace, chain, error)
         trace.model = context.resolved_model
         trace.reasoning_effort = _reasoning_effort(context)
-        active.set_effort(trace.request_id, trace.reasoning_effort)
+        active.set_effort(trace.request_id, trace.reasoning_effort or "none")
         trace.attempts = context.attempt_count
         trace.absorb_attempt_timing(context)
         trace.detail = _safe_failure_detail(error)
@@ -884,7 +895,7 @@ async def _dispatch_after_body(
         )
     active.set_model(trace.request_id, context.resolved_model)
     trace.reasoning_effort = _reasoning_effort(context)
-    active.set_effort(trace.request_id, trace.reasoning_effort)
+    active.set_effort(trace.request_id, trace.reasoning_effort or "none")
     active.set_attempts(
         trace.request_id,
         context.attempt_count,
@@ -941,7 +952,7 @@ async def _dispatch_after_body(
         stop_reason: str,
     ) -> HandBackOutcome | None:
         return hand_back_block(
-            chain=chain,
+            retry=chain.config.upstream_request_retry,
             context=context,
             inbound_payload=inbound_payload,
             wire_format=route.wire_format,
@@ -960,7 +971,7 @@ async def _dispatch_after_body(
     if context.stream:
         # The instant the driver fixed when it opened this attempt, read rather than recomputed: a second `now + deadline` here would start the clock at the moment the headers came back and quietly grant the attempt a second full lifetime.
         attempt = context.current_attempt
-        settings = stream_settings(chain)
+        settings = stream_settings(chain.config.client_delivery)
         completion_delivery = _CompletionDelivery()
         if handled.delivery_plan is None:
             raise RuntimeError("stream delivery plan is not configured")
@@ -989,7 +1000,7 @@ async def _dispatch_after_body(
                                 with_deadline_at(
                                     with_idle_timeout(
                                         response.aiter_bytes(),
-                                        timeout_seconds=stream_idle_seconds(chain),
+                                        timeout_seconds=stream_idle_seconds(chain.config.upstream_request_timeouts),
                                     ),
                                     deadline_at=attempt.deadline_at if attempt is not None else None,
                                 ),
@@ -1035,7 +1046,7 @@ async def _dispatch_after_body(
             with_deadline_at(
                 with_idle_timeout(
                     response.aiter_bytes(),
-                    timeout_seconds=stream_idle_seconds(chain),
+                    timeout_seconds=stream_idle_seconds(chain.config.upstream_request_timeouts),
                 ),
                 deadline_at=attempt.deadline_at if attempt is not None else None,
             )
@@ -1132,7 +1143,7 @@ async def _dispatch_after_body(
             fresh_upstream = UpstreamSource(
                 with_deadline_at(
                     with_idle_timeout(
-                        reopened.aiter_bytes(), timeout_seconds=stream_idle_seconds(chain)
+                        reopened.aiter_bytes(), timeout_seconds=stream_idle_seconds(chain.config.upstream_request_timeouts)
                     ),
                     deadline_at=fresh_attempt.deadline_at if fresh_attempt is not None else None,
                 )
@@ -1303,7 +1314,12 @@ async def _dispatch_after_body(
             inbound_format=route.wire_format.value,
         )
     body = cast(dict[str, Any], parsed_reply)
-    payload = response_payload(chain, handled, body)
+    payload = response_payload(
+        handled,
+        body,
+        translators=chain.translators,
+        retry=chain.config.upstream_request_retry,
+    )
     trace.semantic_response = freeze_json(payload)
     # Summarised before the hand-over is appended, so the line describes what *upstream* produced.
     # The streaming path reads its summary off the assembler, which never sees the synthesised block;

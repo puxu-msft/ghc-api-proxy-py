@@ -12,7 +12,12 @@ from app.config.loading import (
 )
 from app.config.paths import spec_config_file_path
 from app.config.provider import ConfigProvider, pin_restart_only
-from app.config.schema import CodebuddyProviderConfig, GithubCopilotProviderConfig, ProxyConfig
+from app.config.schema import (
+    CodebuddyProviderConfig,
+    GithubCopilotProviderConfig,
+    OpenAICompatibleProviderConfig,
+    ProxyConfig,
+)
 from app.pipeline.routing import compile_thinking_profiles, select_thinking_profile
 
 
@@ -388,6 +393,40 @@ def test_xingchen_instance_fields_are_pinned_without_exposing_values() -> None:
     assert "model_providers.xingchen.models" in outcome.restart_required
 
 
+def test_bridge_reasoning_effort_capability_map_is_restart_only() -> None:
+    startup = ProxyConfig.model_validate(
+        {
+            "model_providers": {
+                "bridge": {
+                    "type": "bridge",
+                    "api_base_url": "https://bridge.example/v1",
+                    "reasoning_efforts": {"bridge-model": ["high"]},
+                }
+            },
+            "default_model_provider": "bridge",
+        }
+    )
+    candidate = ProxyConfig.model_validate(
+        {
+            "model_providers": {
+                "bridge": {
+                    "type": "bridge",
+                    "api_base_url": "https://bridge.example/v1",
+                    "reasoning_efforts": {"bridge-model": ["xhigh"]},
+                }
+            },
+            "default_model_provider": "bridge",
+        }
+    )
+
+    outcome = pin_restart_only(startup, candidate)
+    provider = outcome.config.model_providers["bridge"]
+
+    assert isinstance(provider, OpenAICompatibleProviderConfig)
+    assert provider.reasoning_efforts == {"bridge-model": ("high",)}
+    assert outcome.restart_required == ("model_providers.bridge.reasoning_efforts",)
+
+
 def test_hot_reloadable_change_applies_without_being_reported() -> None:
     startup = ProxyConfig()
     candidate = ProxyConfig.model_validate({"client_delivery": {"sse_ping_interval": 3}})
@@ -593,6 +632,62 @@ def test_a_relative_auth_state_file_is_based_on_the_config_file_too(
     cb = config.model_providers["cb"]
     assert isinstance(cb, CodebuddyProviderConfig)
     assert cb.auth_state_file == str(config_dir / "auth" / "codebuddy.info")
+
+
+def test_a_relative_model_info_file_is_based_on_the_config_file_too(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`model_info_json` names a file the operator keeps, so it resolves like every other path.
+
+    It is the one path field whose absence is not an error — an upstream that publishes a
+    usable catalog needs no local description — so the spellings below are the only reason
+    the field is in `_PATH_FIELDS` at all.
+    """
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    config_dir = tmp_path / "etc"
+    config_dir.mkdir()
+    config_path = write_config(
+        config_dir,
+        "model_providers:\n"
+        "  opencode:\n"
+        "    type: bridge\n"
+        '    api_base_url: "https://opencode.ai/zen/go/v1"\n'
+        '    model_info_json: "model-info/opencode-go.json"\n',
+    )
+    monkeypatch.chdir(elsewhere)
+
+    config = load_proxy_config(config_path=config_path)
+
+    provider = config.model_providers["opencode"]
+    assert isinstance(provider, OpenAICompatibleProviderConfig)
+    assert provider.model_info_json == str(config_dir / "model-info" / "opencode-go.json")
+
+
+def test_a_model_info_file_with_a_shell_default_keeps_the_path_it_names(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`${VAR:-fallback}` resolves in the loader, so an unset variable is not a relative path.
+
+    Rebasing runs after expansion: were the fallback left as literal text the whole
+    spelling would be relative, and the file would be looked for inside the config's own
+    directory under a name nobody wrote.
+    """
+    monkeypatch.delenv("GHC_MODEL_INFO", raising=False)
+    config_path = write_config(
+        tmp_path,
+        "model_providers:\n"
+        "  opencode:\n"
+        "    type: bridge\n"
+        '    api_base_url: "https://opencode.ai/zen/go/v1"\n'
+        '    model_info_json: "${GHC_MODEL_INFO:-/srv/models}/opencode-go.json"\n',
+    )
+
+    config = load_proxy_config(config_path=config_path)
+
+    provider = config.model_providers["opencode"]
+    assert isinstance(provider, OpenAICompatibleProviderConfig)
+    assert provider.model_info_json == "/srv/models/opencode-go.json"
 
 
 def test_an_absolute_or_expandable_path_is_left_where_it_points(tmp_path: Path) -> None:

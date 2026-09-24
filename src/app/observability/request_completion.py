@@ -7,11 +7,12 @@ from collections.abc import Mapping
 from contextlib import suppress
 from dataclasses import dataclass, field
 from enum import StrEnum
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING, Any, Protocol, cast
 
 from starlette.requests import ClientDisconnect
 
 from app.model_provider.upstream_errors import normalize_upstream_error
+from app.observability.active_requests import ActiveRequestRegistry
 from app.observability.capture_observation import RawCaptureObservation
 from app.observability.logging import get_logger
 from app.observability.metrics import TRANSLATION_LOSSES
@@ -30,6 +31,7 @@ from app.observability.request_log import (
 )
 from app.observability.request_log_file import utc_timestamp, write_finalized_record
 from app.observability.request_trace import REQUEST_LOGGER, RequestTrace, request_line_from_trace
+from app.observability.terminal import TerminalCapabilities
 from app.pipeline.delivery.assembling import ClientAction, ReplyDialect
 from app.pipeline.exceptions import UpstreamError, UpstreamRejected
 from app.pipeline.response_action import ClientActionRequirement
@@ -51,7 +53,10 @@ from app.tokenization.admission import TokenAdmissionObservation
 from app.wire_json import JsonValue
 
 if TYPE_CHECKING:
-    from app.core.chain import Chain
+    # Imported only for names the protocol below is checked against. A runtime
+    # import here would close the `app.history.entry -> this module -> app.history`
+    # cycle that `_submit_history_projection`'s function-local import exists to avoid.
+    from app.history import HistoryEntry, HistorySubmission
 
 logger = logging.getLogger(__name__)
 
@@ -61,6 +66,24 @@ def _warn_no_raise(message: str, *args: object) -> None:
     # The logging handler is the failed observability sink here. There is no independent safe channel left to report that second failure through.
     with suppress(BaseException):
         logger.warning(message, *args)
+
+
+class HistoryProjectionSink(Protocol):
+    """The one history-writer operation the completion path may use.
+
+    Satisfied by `app.history.writer.HistoryWriter`. Declared here so this module
+    never imports `app.history` at runtime — that package's entry model imports
+    this one, and the direction must stay one-way. `Chain` satisfies it by holding
+    such a writer; the coordinator takes the writer, not the chain.
+    """
+
+    def submit_nowait(
+        self,
+        entry: HistoryEntry,
+        *,
+        session_id: str | None,
+        agent_id: str | None,
+    ) -> HistorySubmission: ...
 
 
 class DeliveryState(StrEnum):
@@ -281,7 +304,9 @@ FinalizedRequest = RequestFacts
 
 @dataclass(slots=True)
 class RequestCompletionCoordinator:
-    chain: Chain
+    active_requests: ActiveRequestRegistry
+    history_writer: HistoryProjectionSink | None
+    capabilities: TerminalCapabilities
     trace: RequestTrace
     request_id: str
     _state: DeliveryState = DeliveryState.NOT_STARTED
@@ -401,7 +426,7 @@ class RequestCompletionCoordinator:
                 self._downstream_body_bytes = 0
             self._downstream_body_bytes += count
             try:
-                self.chain.active_requests.add_downstream_bytes(self.request_id, count)
+                self.active_requests.add_downstream_bytes(self.request_id, count)
             except Exception as error:
                 _warn_no_raise(
                     "could not update live downstream bytes: exception_type=%s",
@@ -839,14 +864,14 @@ class RequestCompletionCoordinator:
 
     def _emit(self, record: RequestFacts, *, retry_as_success: bool) -> None:
         sinks = (
-            ("request store", lambda: self.chain.active_requests.complete(self.request_id, record)),
-            ("history projection", lambda: _submit_history_projection(self.chain, record)),
+            ("request store", lambda: self.active_requests.complete(self.request_id, record)),
+            ("history projection", lambda: _submit_history_projection(self.history_writer, record)),
             ("translation loss metrics", lambda: _record_translation_losses(record)),
             ("structured request record", lambda: write_finalized_record(record.to_record_dict())),
             (
                 "completion line",
                 lambda: _log_finalized(
-                    self.chain,
+                    self.capabilities,
                     record,
                     retry_as_success=retry_as_success,
                 ),
@@ -863,8 +888,9 @@ class RequestCompletionCoordinator:
                 )
 
 
-def _submit_history_projection(chain: Chain, record: RequestFacts) -> None:
-    history_writer = getattr(chain, "history_writer", None)
+def _submit_history_projection(
+    history_writer: HistoryProjectionSink | None, record: RequestFacts
+) -> None:
     if history_writer is None:
         return
     from app.history import HistoryEntry, HistorySubmission
@@ -1008,7 +1034,7 @@ def _record_translation_losses(record: RequestFacts) -> None:
 
 
 def _log_finalized(
-    chain: Chain,
+    capabilities: TerminalCapabilities,
     record: RequestFacts,
     *,
     retry_as_success: bool = False,
@@ -1018,8 +1044,8 @@ def _log_finalized(
         format_completion_line(
             line,
             status=record.status,
-            unicode=chain.capabilities.unicode,
-            color=chain.capabilities.color,
+            unicode=capabilities.unicode,
+            color=capabilities.color,
             response_observation=record.response,
             upstream_body_attempts=record.upstream_body_attempts,
             retry_as_success=retry_as_success,

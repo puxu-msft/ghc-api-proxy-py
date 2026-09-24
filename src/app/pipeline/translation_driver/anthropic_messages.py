@@ -7,6 +7,7 @@ import json
 from collections.abc import Mapping
 from typing import Any, cast
 
+from app.config.schema import UnportableReasoningCarrierPolicy
 from app.pipeline.translation_driver.content import BlockKind, ContentBlock, SemanticMessage
 from app.pipeline.translation_driver.options import TranslationOptions
 from app.pipeline.translation_driver.reasoning import (
@@ -451,6 +452,8 @@ def _block_to_anthropic(
     conversion: Conversion,
     *,
     bridge_for_client: bool,
+    unportable_reasoning_carrier: UnportableReasoningCarrierPolicy = "degrade",
+    field_path: str = "",
 ) -> dict[str, Any] | None:
     if block.kind is BlockKind.TEXT:
         return {"type": TEXT, "text": block.text}
@@ -459,6 +462,8 @@ def _block_to_anthropic(
             block,
             conversion,
             bridge_for_client=bridge_for_client,
+            unportable_reasoning_carrier=unportable_reasoning_carrier,
+            field_path=field_path,
         )
     if block.kind is BlockKind.TOOL_USE:
         return {
@@ -624,6 +629,8 @@ def _reasoning_to_anthropic(
     conversion: Conversion,
     *,
     bridge_for_client: bool,
+    unportable_reasoning_carrier: UnportableReasoningCarrierPolicy,
+    field_path: str,
 ) -> dict[str, Any] | None:
     """Render reasoning natively, or put provider-specific state in a client carrier."""
     content = block.reasoning
@@ -633,12 +640,13 @@ def _reasoning_to_anthropic(
     try:
         return reasoning_to_anthropic(content, bridge_for_client=bridge_for_client)
     except ReasoningNotPortable:
-        state = content.state
-        source = state.format.value if state is not None else content.source_format
-        conversion.record(
-            LossCode.REASONING_STATE_NOT_PORTABLE,
-            f"{source} cannot be written to an Anthropic upstream",
-        )
+        if unportable_reasoning_carrier == "refuse" and not bridge_for_client:
+            raise TranslationRefused(
+                "reasoning state cannot be written to an Anthropic upstream",
+                code="reasoning_carrier_not_unwrapped",
+                field_path=field_path,
+            ) from None
+        conversion.record_nonportable_reasoning()
         return None
 
 
@@ -785,20 +793,24 @@ def to_anthropic_messages(
     if options is not None and target_model is None:
         target_model = options.target
     target = target_model or TranslationTarget()
+    policy = (
+        options.model_translation.to_anthropic_messages.unportable_reasoning_carrier
+        if options is not None and options.model_translation is not None
+        else "degrade"
+    )
     messages: list[dict[str, Any]] = []
-    for message in request.messages:
-        rendered = [
-            block
-            for block in (
-                _block_to_anthropic(
-                    b,
-                    request.conversion,
-                    bridge_for_client=False,
-                )
-                for b in message.blocks
+    for message_index, message in enumerate(request.messages):
+        rendered: list[dict[str, Any]] = []
+        for block_index, block in enumerate(message.blocks):
+            shaped = _block_to_anthropic(
+                block,
+                request.conversion,
+                bridge_for_client=False,
+                unportable_reasoning_carrier=policy,
+                field_path=f"messages.{message_index}.content.{block_index}",
             )
-            if block is not None
-        ]
+            if shaped is not None:
+                rendered.append(shaped)
         messages.append({"role": message.role, "content": rendered})
 
     payload: dict[str, Any] = {"model": request.model, "messages": messages}

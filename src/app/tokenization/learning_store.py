@@ -99,7 +99,7 @@ from app.tokenization.types import (
 
 _MAX_IDENTITY_TEXT_BYTES = 1_024
 _MAX_SAMPLE_KEY_TEXT_BYTES = 1_024
-_MAX_JSON_BYTES = 64 * 1_024
+_MAX_JSON_BYTES = 1 * 1_024 * 1_024
 _SQLITE_PARAMETER_CHUNK = 300
 
 type Transition = Callable[[LearningSnapshot], LearningUpdate]
@@ -287,6 +287,10 @@ class UnsupportedLearningSchemaError(LearningStoreStartupError):
 
 class LearningStoreTransitionError(LearningStoreError):
     """Raised when a pure transition fails or changes analyzed facts."""
+
+
+class LearningStoreStorageLimitError(ValueError):
+    """Raised when a durable JSON field exceeds the V1 storage bound."""
 
 
 class StoreOperationCancelled(asyncio.CancelledError):
@@ -2087,6 +2091,8 @@ class TokenLearningStore:
                     action_id="cpu.transition",
                 )
             except _ActionCancelled:
+                raise
+            except LearningStoreStorageLimitError:
                 raise
             except Exception as error:
                 raise LearningStoreTransitionError(
@@ -5577,7 +5583,9 @@ def _encode_json(value: object, name: str) -> str:
         sort_keys=True,
     )
     if len(encoded.encode("utf-8")) > _MAX_JSON_BYTES:
-        raise ValueError(f"{name} exceeds the {_MAX_JSON_BYTES}-byte storage limit")
+        raise LearningStoreStorageLimitError(
+            f"{name} exceeds the {_MAX_JSON_BYTES}-byte storage limit"
+        )
     return encoded
 
 

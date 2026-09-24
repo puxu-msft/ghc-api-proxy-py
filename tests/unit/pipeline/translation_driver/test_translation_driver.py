@@ -5,6 +5,7 @@ from typing import Any, cast
 
 import pytest
 
+from app.config.schema import ModelTranslationConfig, ToAnthropicMessagesConfig
 from app.pipeline.request import WireFormat
 from app.pipeline.translation_driver.anthropic_messages import (
     from_anthropic_messages,
@@ -15,6 +16,7 @@ from app.pipeline.translation_driver.openai_responses import (
     from_openai_responses,
     to_openai_responses,
 )
+from app.pipeline.translation_driver.options import TranslationOptions
 from app.pipeline.translation_driver.reasoning import (
     EffortSource,
     ThinkingEffortIntent,
@@ -752,6 +754,40 @@ def test_nested_extension_reasoning_fields_are_not_counted_as_lost_effort() -> N
         "from openai-responses into anthropic-messages: reasoning.summary",
     ]
     assert all("reasoning.effort" not in loss.detail for loss in cross_format_request.conversion.losses)
+
+
+def test_nonportable_responses_reasoning_can_degrade_or_refuse_before_anthropic_send() -> None:
+    source: dict[str, Any] = {
+        "model": "claude-model",
+        "input": [
+            {"type": "reasoning", "summary": [], "encrypted_content": "native-responses-state"},
+            {"type": "reasoning", "summary": [], "encrypted_content": "another-native-state"},
+            {"role": "user", "content": [{"type": "input_text", "text": "continue"}]},
+        ],
+    }
+    request = from_openai_responses(source)
+    output = to_anthropic_messages(request)
+    assert [message["content"] for message in output["messages"]] == [
+        [],
+        [{"type": "text", "text": "continue"}],
+    ]
+    assert [loss.code for loss in request.conversion.losses] == [
+        LossCode.REASONING_STATE_NOT_PORTABLE
+    ]
+    assert request.conversion.losses[0].detail == "nonportable reasoning was omitted from this request"
+    to_anthropic_messages(request)
+    assert len(request.conversion.losses) == 1
+
+    strict = from_openai_responses(source)
+    options = TranslationOptions(
+        model_translation=ModelTranslationConfig(
+            to_anthropic_messages=ToAnthropicMessagesConfig(unportable_reasoning_carrier="refuse")
+        )
+    )
+    with pytest.raises(TranslationRefused) as caught:
+        to_anthropic_messages(strict, options=options)
+    assert caught.value.code == "reasoning_carrier_not_unwrapped"
+    assert caught.value.field_path == "messages.0.content.0"
 
 
 def test_anthropic_reader_defaults_omitted_thinking_and_effort_to_enabled_high() -> None:

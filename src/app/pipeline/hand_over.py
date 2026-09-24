@@ -14,7 +14,7 @@ from uuid import uuid4
 from h2.events import ConnectionTerminated, StreamReset
 from h2.exceptions import H2Error
 
-from app.core.chain import Chain
+from app.config.schema import UpstreamRequestRetryConfig
 from app.errors import ErrorCategory
 from app.model_provider.upstream_errors import normalize_upstream_error
 from app.observability.logging import get_logger
@@ -300,7 +300,7 @@ def interruption_message(
 
 def hand_back_block(
     *,
-    chain: Chain,
+    retry: UpstreamRequestRetryConfig,
     context: RequestContext,
     inbound_payload: dict[str, Any],
     wire_format: WireFormat,
@@ -316,7 +316,7 @@ def hand_back_block(
     """
     if wire_format is not WireFormat.ANTHROPIC_MESSAGES:
         return None
-    name = chain.config.upstream_request_retry.auto_retry_tool_call_full_name
+    name = retry.auto_retry_tool_call_full_name
     if not name:
         return None
     declared = context.payload.get("tools")

@@ -99,7 +99,7 @@ def test_a_successful_request_writes_one_complete_structured_record(tmp_path: Pa
     )
     trace.absorb(terminal)
 
-    log_completion(_chain(), trace, 200, upstream_response_body_bytes=2153)
+    log_completion(trace, 200, capabilities=_chain().capabilities, upstream_response_body_bytes=2153)
 
     record = _only_record(tmp_path)
     assert set(record) == {
@@ -232,7 +232,7 @@ def test_legacy_tool_summary_does_not_fabricate_native_terminal_facts(
     trace = RequestTrace(method="POST", path="/v1/messages", started=time.monotonic())
 
     trace.absorb(terminal)
-    log_completion(_chain(), trace, 200, upstream_response_body_bytes=0)
+    log_completion(trace, 200, capabilities=_chain().capabilities, upstream_response_body_bytes=0)
 
     record = _only_record(tmp_path)
     assert record["tools"] == ["Bash"]
@@ -262,7 +262,7 @@ def test_conversion_facts_are_durable_without_becoming_losses(tmp_path: Path, mo
     )
 
     trace.absorb_conversion(context)
-    log_completion(_chain(), trace, 200, upstream_response_body_bytes=0)
+    log_completion(trace, 200, capabilities=_chain().capabilities, upstream_response_body_bytes=0)
 
     record = _only_record(tmp_path)
     assert record["facts"] == [
@@ -291,7 +291,7 @@ def test_a_failed_request_keeps_detail_and_reports_no_terminal(tmp_path: Path, m
         terminal_seen=False,
     )
 
-    log_completion(_chain(), trace, 200, upstream_response_body_bytes=trace.received)
+    log_completion(trace, 200, capabilities=_chain().capabilities, upstream_response_body_bytes=trace.received)
 
     record = _only_record(tmp_path)
     assert record["status"] == "fail"
@@ -309,7 +309,7 @@ def test_a_write_failure_does_not_interrupt_request_completion(tmp_path: Path, m
     monkeypatch.setattr(request_log_file, "user_data_path", lambda: tmp_path / "nope" / "\0bad")
     trace = RequestTrace(method="POST", path="/v1/messages", started=time.monotonic(), started_at="2026-08-20T15:01:53.580Z")
 
-    log_completion(_chain(), trace, 200, upstream_response_body_bytes=0)
+    log_completion(trace, 200, capabilities=_chain().capabilities, upstream_response_body_bytes=0)
 
     assert len(emitted) == 1
     assert emitted[0][1] == "ok"

@@ -701,6 +701,7 @@ def build_chain(
         assistant_message_layout=(
             config.hook_fix_anthropic_request.thinking.assistant_message_layout
         ),
+        unportable_reasoning_carrier=config.model_translation.to_anthropic_messages.unportable_reasoning_carrier,
         cache_control=config.hook_fix_anthropic_request.cache_control,
         # Compiled here rather than per request, for the same reason as the beta table above it: a pattern that does not compile should stop start-up, in the config's own words, rather than raise from inside whichever request first reached it.
         cache_control_sanitize=compile_sanitize_table(

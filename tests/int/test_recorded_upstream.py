@@ -83,8 +83,8 @@ async def test_a_recorded_stream_assembles_into_anthropic_blocks() -> None:
             async for chunk in delivering(
                 response.aiter_bytes(),
                 assembler_for(handled),
-                buffer=delivery_buffer(chain),
-                settings=stream_settings(chain),
+                buffer=delivery_buffer(chain.config.client_delivery),
+                settings=stream_settings(chain.config.client_delivery),
                 framer=AnthropicFramer(message_id=context.id, model=context.resolved_model),
             )
         ]

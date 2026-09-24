@@ -1,4 +1,8 @@
 """Facts shared across domains, owned by none of them.
 
-Generation and release ids are parsed here rather than under `lifecycle.rolling`, because `tokenization.snapshot_store` names them too: a module that several domains depend on cannot live inside one of them without making that one a dependency of the others.
+This package holds the assembly record (`chain.py`) that `server`, `pipeline` and
+`debug` all read. The generation/release id parsers used to live here for the same
+reason, but their only live consumer proved to be `tokenization.snapshot_store`,
+so they moved to `app.tokenization` — keeping them here for one consumer would
+have kept `tokenization` depending on `core` for no reason.
 """

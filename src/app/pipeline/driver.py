@@ -17,7 +17,6 @@ import httpx2
 from pydantic import ValidationError
 
 from app.config.schema import LOCAL_COUNTER
-from app.core.chain import Chain
 from app.model_provider import ModelDescriptor, ModelEndpoint, ModelProvider
 from app.models.anthropic import MessagesRequest
 from app.observability.metrics import BETA_FLAGS_STRIPPED
@@ -38,6 +37,7 @@ from app.pipeline.delivery.formats.anthropic_messages_synthetic_reply import (
     query_from_request,
 )
 from app.pipeline.delivery_policy import assembler_for, delivery_buffer, framer_for
+from app.pipeline.deps import DriverDeps
 from app.pipeline.direct_driver import (
     DRIVERS,
     EVENT_ATTEMPT_PREPARE,
@@ -74,13 +74,13 @@ from app.tokenization.scaling import scale_local_estimate
 from app.wire_json import dumps
 
 
-def ledger_for(context: RequestContext, chain: Chain) -> RetryLedger:
+def ledger_for(context: RequestContext, deps: DriverDeps) -> RetryLedger:
     """One budget for the whole client request, built on first use and kept on the request.
 
     It used to be built per call, which was the same thing while a request meant one call. It is not any more: delivery opens further attempts after a torn body, long after the driver that opened the first has returned, and each of those would have arrived with a full budget of its own — `max_total` would have bounded a call rather than a request, which is not what it is named for.
     """
     if context.retry_ledger is None:
-        context.retry_ledger = RetryLedger(chain.config.upstream_request_retry)
+        context.retry_ledger = RetryLedger(deps.config.upstream_request_retry)
     return context.retry_ledger
 
 
@@ -94,7 +94,7 @@ def _notify_provider_bound(context: RequestContext) -> None:
 
 
 def shape_request(
-    chain: Chain,
+    deps: DriverDeps,
     context: RequestContext,
     on_routed: Callable[[RequestContext], None] | None = None,
 ) -> tuple[ModelProvider, Route]:
@@ -108,10 +108,10 @@ def shape_request(
     route = decide_route(
         requested_model=context.requested_model,
         inbound_format=context.inbound_format,
-        providers=chain.providers,
-        mappings=chain.config.model_mappings,
+        providers=deps.providers,
+        mappings=deps.config.model_mappings,
     )
-    provider = chain.providers.get(route.provider_name)
+    provider = deps.providers.get(route.provider_name)
     apply_route(context, route)
     if on_routed is not None:
         # Announced the moment the model is known rather than when the request finishes, because everything below this line can take tens of seconds and a display that waits for it reports "still deciding" for the whole upstream call. That is not slow feedback, it is wrong feedback.
@@ -139,13 +139,13 @@ def shape_request(
         context.client_headers, stripped_flags = strip_denied_beta_flags(
             context.client_headers,
             model=context.resolved_model,
-            denials=chain.beta_flag_denials,
+            denials=deps.beta_flag_denials,
         )
         for flag in stripped_flags:
             BETA_FLAGS_STRIPPED.labels(model=context.resolved_model, flag=flag).inc()
 
         # Before translation on purpose: these fixups read `messages`, which the target format may not have. The spec calls this point `on_client_request_parsed`.
-        fix_anthropic_request(context.payload, chain.config.hook_fix_anthropic_request)
+        fix_anthropic_request(context.payload, deps.config.hook_fix_anthropic_request)
     return provider, route
 
 
@@ -158,22 +158,22 @@ def _keep_conversion_facts(
 
 
 def _translate_with_facts(
-    chain: Chain,
+    deps: DriverDeps,
     context: RequestContext,
     route: Route,
     descriptor: ModelDescriptor,
     source_headers: Mapping[str, str],
 ) -> tuple[dict[str, Any], SemanticRequest]:
-    target = translation_target(descriptor, chain.thinking_profiles)
+    target = translation_target(descriptor, deps.thinking_profiles)
     options = TranslationOptions(
         source_headers=source_headers,
         translated=route.inbound_format is not route.target_format,
         target=target,
-        model_translation=chain.config.model_translation,
+        model_translation=deps.config.model_translation,
     )
     context.translation_options = options
     try:
-        translated, semantic = chain.translators.translate(
+        translated, semantic = deps.translators.translate(
             context.payload,
             source=route.inbound_format,
             target=route.target_format,
@@ -189,7 +189,7 @@ def _translate_with_facts(
 
 
 def _reencode_target_payload(
-    chain: Chain,
+    deps: DriverDeps,
     context: RequestContext,
     *,
     payload: Mapping[str, Any],
@@ -201,8 +201,8 @@ def _reencode_target_payload(
     options = context.translation_options
     if options is None:
         raise RuntimeError("translated attempt has no translation options")
-    semantic = chain.translators.decode(payload, source=source_format, options=options)
-    translated = chain.translators.encode(
+    semantic = deps.translators.decode(payload, source=source_format, options=options)
+    translated = deps.translators.encode(
         semantic,
         target=target_format,
         options=options,
@@ -215,9 +215,9 @@ def _reencode_target_payload(
     return translated
 
 
-async def handle(chain: Chain, context: RequestContext, on_routed: Callable[[RequestContext], None] | None = None) -> HandledRequest:
+async def handle(deps: DriverDeps, context: RequestContext, on_routed: Callable[[RequestContext], None] | None = None) -> HandledRequest:
     source_headers = context.source_headers_for_translation()
-    provider, route = shape_request(chain, context, on_routed)
+    provider, route = shape_request(deps, context, on_routed)
     descriptor = route.descriptor
     if descriptor is None:
         raise RuntimeError("routed request has no model descriptor")
@@ -227,15 +227,15 @@ async def handle(chain: Chain, context: RequestContext, on_routed: Callable[[Req
     # **Gated on the inbound format, not only on the body.** The reply this synthesises is an Anthropic Message, and the request it recognises is defined as a non-streaming `/v1/messages`. Without this guard a Chat Completions request whose content parts happened to match the markers was answered with an Anthropic body on the `/chat/completions` path — a protocol the caller has no reason to be able to read, for a request that never reached upstream. The predicates are the wrong tool for deciding which endpoint a body arrived on; the route already knows.
     if context.inbound_format is WireFormat.ANTHROPIC_MESSAGES:
         verdict = classify(
-            context.payload, chain.config.hook_fix_anthropic_request.intercept_auto_mode_classifier
+            context.payload, deps.config.hook_fix_anthropic_request.intercept_auto_mode_classifier
         )
         if verdict is not None:
-            outcome = _answered_auto_mode(context, route, verdict, chain)
+            outcome = _answered_auto_mode(context, route, verdict, deps)
             # The client request succeeded, so the request-level event fires even though no attempt did. The attempt-level ones deliberately do not: there was no upstream leg for them to describe, and `attempt.prepare` subscribers exist to shape a body that is about to be sent.
             #
             # Published here rather than inside the driver because the driver is never built on this path. A subscriber raising propagates, which is the same contract it has inside the driver — there it steers the retry loop, and here there is no loop to steer, so it reaches the caller.
             outcome.events.append(EVENT_REQUEST_SUCCEEDED)
-            for subscription in chain.subscribers.for_event(EVENT_REQUEST_SUCCEEDED):
+            for subscription in deps.subscribers.for_event(EVENT_REQUEST_SUCCEEDED):
                 await subscription.handler(context)
             return HandledRequest(
                 context=context,
@@ -246,7 +246,7 @@ async def handle(chain: Chain, context: RequestContext, on_routed: Callable[[Req
 
     if route.translation_required:
         translated, semantic = _translate_with_facts(
-            chain,
+            deps,
             context,
             route,
             descriptor,
@@ -256,7 +256,7 @@ async def handle(chain: Chain, context: RequestContext, on_routed: Callable[[Req
         context.client_search_tool = semantic.client_search_tool
         context.hosted_web_search_expected = semantic.hosted_web_search_expected
         context.semantic_request = semantic
-        context.translation_target = translation_target(descriptor, chain.thinking_profiles)
+        context.translation_target = translation_target(descriptor, deps.thinking_profiles)
         if not semantic.conversion.lossless:
             context.extras["conversion_losses"] = list(semantic.conversion.losses)
 
@@ -264,7 +264,7 @@ async def handle(chain: Chain, context: RequestContext, on_routed: Callable[[Req
     context.payload["model"] = route.model_id
 
     return await _drive(
-        chain,
+        deps,
         context,
         provider,
         route,
@@ -274,7 +274,7 @@ async def handle(chain: Chain, context: RequestContext, on_routed: Callable[[Req
 
 
 async def replay_prepared(
-    chain: Chain,
+    deps: DriverDeps,
     context: RequestContext,
     route: Route,
     prepared_payload: Mapping[str, Any],
@@ -285,13 +285,13 @@ async def replay_prepared(
     descriptor = route.descriptor
     if descriptor is None:
         raise RuntimeError("replay route has no model descriptor")
-    provider = chain.providers.get(route.provider_name)
+    provider = deps.providers.get(route.provider_name)
     apply_route(context, route)
     if on_routed is not None:
         on_routed(context)
     context.payload = deepcopy(dict(prepared_payload))
     return await _drive(
-        chain,
+        deps,
         context,
         provider,
         route,
@@ -303,7 +303,7 @@ async def replay_prepared(
 
 
 async def _drive(
-    chain: Chain,
+    deps: DriverDeps,
     context: RequestContext,
     provider: ModelProvider,
     route: Route,
@@ -313,28 +313,28 @@ async def _drive(
     reused_admission: TokenAdmissionObservation | None = None,
     on_routed: Callable[[RequestContext], None] | None = None,
 ) -> HandledRequest:
-    timeouts = chain.config.upstream_request_timeouts
+    timeouts = deps.config.upstream_request_timeouts
     # Read straight off the field it names. It used to be resolved against `response_header_overrides`, which is a different setting entirely: an operator capping the header wait for one model would have capped that model's whole attempt instead, cutting a long turn short in the name of a guard that was never asked for.
     attempt_deadline = timeouts.upstream_request_deadline
     driver_type = DRIVERS[route.endpoint]
     driver_options: dict[str, Any] = {}
     if route.endpoint is ModelEndpoint.OPENAI_RESPONSES:
         driver_options["connection_bound_input_id_policy"] = (
-            chain.config.hook_fix_responses_request.fix_401_item_id_not_belong_to_this_connection
+            deps.config.hook_fix_responses_request.fix_401_item_id_not_belong_to_this_connection
         )
     driver = driver_type(
         provider,
-        chain.subscribers,
+        deps.subscribers,
         budget=LedgerBudget(
-            ledger_for(context, chain),
+            ledger_for(context, deps),
             # Read at each refusal rather than sampled now: a drain that begins while this request is in flight has to stop the *next* attempt, and a value captured here would say "running" for the whole request.
-            draining=lambda: chain.active_requests.draining,
+            draining=lambda: deps.active_requests.draining,
         ),
         attempt_deadline=attempt_deadline,
         response_header_timeout=timeouts.response_header,
-        rate_limiter=chain.rate_limiter_for(provider.name),
+        rate_limiter=deps.rate_limiter_for(provider.name),
         descriptor=descriptor,
-        admission=chain.prompt_token_admission,
+        admission=deps.prompt_token_admission,
         prepared_payload=prepared_payload,
         reused_admission=reused_admission,
         **driver_options,
@@ -345,7 +345,7 @@ async def _drive(
         def reencode_target_payload(payload: Mapping[str, Any]) -> dict[str, Any]:
             target_format = context.target_format or route.target_format
             return _reencode_target_payload(
-                chain,
+                deps,
                 context,
                 payload=payload,
                 source_format=source_target_format,
@@ -372,13 +372,13 @@ async def _drive(
                 assembler=assembler_for(
                     handled,
                     hand_over_stop_reasons=frozenset(
-                        chain.config.upstream_request_retry.hand_over_stop_reasons
+                        deps.config.upstream_request_retry.hand_over_stop_reasons
                     ),
                 ),
-                buffer=delivery_buffer(chain),
+                buffer=delivery_buffer(deps.config.client_delivery),
                 framer=framer_for(
                     handled,
-                    chain,
+                    deps.config,
                     message_id=context.id,
                     model=context.resolved_model,
                     on_passthrough_terminal_unit=on_passthrough_terminal_unit,
@@ -414,13 +414,13 @@ async def _drive(
 
     async def reopen(replacing: Exception) -> HandledRequest | None:
         del replacing
-        if chain.active_requests.draining:
+        if deps.active_requests.draining:
             return None
         if source_payload is None or source_admission is None:
             raise RuntimeError("upstream replay has no source attempt admission")
-        chain.rate_limiter_for(route.provider_name).note_failure()
+        deps.rate_limiter_for(route.provider_name).note_failure()
         return await replay_prepared(
-            chain,
+            deps,
             context,
             route,
             source_payload,
@@ -463,7 +463,7 @@ def _answered_failed_search(context: RequestContext, route: Route) -> DriverOutc
     )
 
 def _answered_auto_mode(
-    context: RequestContext, route: Route, verdict: AutoModeVerdict, chain: Chain
+    context: RequestContext, route: Route, verdict: AutoModeVerdict, deps: DriverDeps
 ) -> DriverOutcome:
     """The authorisation decision this proxy made, dressed as the reply upstream would have sent.
 
@@ -471,7 +471,7 @@ def _answered_auto_mode(
 
     The size is measured off `original_payload` — the body as the client sent it, before the fixups — because that is the request this feature exists to not send. It is **a re-serialisation, not the received byte count**: whitespace, key order and Unicode escaping may all differ from what arrived, and the received length is not kept anywhere (`inference.py` reads the body and does not record how long it was). Close enough to say what was saved, and not the same number as `content-length`.
     """
-    text = verdict_text(verdict, chain.config.hook_fix_anthropic_request.intercept_auto_mode_classifier.block_reason_str)
+    text = verdict_text(verdict, deps.config.hook_fix_anthropic_request.intercept_auto_mode_classifier.block_reason_str)
     source = context.original_payload or context.payload
     log_hit(verdict, request_bytes=len(dumps(source)))
 
@@ -504,7 +504,7 @@ def _validate_count_tokens_messages(payload: Mapping[str, Any]) -> None:
 
 
 async def handle_count_tokens(
-    chain: Chain,
+    deps: DriverDeps,
     context: RequestContext,
     on_routed: Callable[[RequestContext], None] | None = None,
     on_upstream_response: Callable[[RequestContext], None] | None = None,
@@ -519,7 +519,7 @@ async def handle_count_tokens(
     """
     _check_count_deadline(deadline_at)
     source_headers = context.source_headers_for_translation()
-    provider, route = shape_request(chain, context)
+    provider, route = shape_request(deps, context)
     descriptor = route.descriptor
     if descriptor is None:
         raise RuntimeError("count route has no model descriptor")
@@ -530,7 +530,7 @@ async def handle_count_tokens(
     # This is also the only way the subscribers see here what they see in production: the driver publishes `attempt.prepare` after translation, so publishing it before would hand them a protocol they never meet on this route.
     if route.translation_required:
         translated, semantic = _translate_with_facts(
-            chain,
+            deps,
             context,
             route,
             descriptor,
@@ -545,7 +545,7 @@ async def handle_count_tokens(
     # Counting measures a body; it does not send one. A subscriber that refuses a request this endpoint cannot serve is right to do so on the leg that would have served it, and wrong here:
     # nothing is executed, no reply is produced, and there is therefore nothing that could come back invented. Refusing would only turn a question with an answer — how large is this — into an error, and push the client onto its local estimate for no gain.
     context.extras[COUNTING_ONLY] = True
-    for subscription in chain.subscribers.for_event(EVENT_ATTEMPT_PREPARE):
+    for subscription in deps.subscribers.for_event(EVENT_ATTEMPT_PREPARE):
         await subscription.handler(context)
     _notify_provider_bound(context)
 
@@ -560,7 +560,7 @@ async def handle_count_tokens(
         raise CountTokensRequestError(
             f"no token estimator for {route.target_format.value}; add one before routing counts there"
         )
-    calibration = chain.tokenization.calibration
+    calibration = deps.tokenization.calibration
     estimate: int | None = None
     prediction: float | None = None
 
@@ -569,7 +569,7 @@ async def handle_count_tokens(
         if estimate is None and prediction is None:
             _check_count_deadline(deadline_at)
             if route.target_format is WireFormat.OPENAI_RESPONSES:
-                selected = await chain.token_learning.predict_responses(
+                selected = await deps.token_learning.predict_responses(
                     payload=estimate_payload,
                     provider_name=provider.name,
                     resolved_model=route.model_id,
@@ -580,7 +580,7 @@ async def handle_count_tokens(
                 if selected is not None:
                     prediction = selected.unscaled_tokens
             if prediction is None:
-                estimate = await chain.local_token_worker.estimate(
+                estimate = await deps.local_token_worker.estimate(
                     protocol,
                     estimate_payload,
                     capabilities=descriptor.tokenization_capabilities,
@@ -740,7 +740,7 @@ async def handle_count_tokens(
     # A request no translator can carry never reaches here: `translate` above raises `TranslatorNotFound` exactly as it does for the request being counted, and the client gets the same 400 it would have got for sending it.
     upstream_counts = route.target_format is WireFormat.ANTHROPIC_MESSAGES
 
-    settings = chain.config.inbound.anthropic_count_tokens
+    settings = deps.config.inbound.anthropic_count_tokens
     payload = dict(context.payload)
     payload.pop("stream", None)
     absent_reason = f"no-counter-for-{route.target_format.value}"
@@ -803,7 +803,7 @@ async def handle_count_tokens(
     return {"input_tokens": result.tokens, "estimated": True}
 
 async def handle_bounded(
-    chain: Chain,
+    deps: DriverDeps,
     context: RequestContext,
     on_routed: Callable[[RequestContext], None] | None = None,
     *,
@@ -815,9 +815,9 @@ async def handle_bounded(
 
     This covers a non-streaming reply whole, because its body is read before `handle` returns. A streaming body is not: `await send` returns at the response headers, so what arrives afterwards is bounded by the same instant enforced a second time, over the body, in `pipeline_app`.
     """
-    deadline = chain.config.client_delivery.client_request_deadline
+    deadline = deps.config.client_delivery.client_request_deadline
     if deadline <= 0:
-        return await handle(chain, context, on_routed)
+        return await handle(deps, context, on_routed)
     bound = (
         asyncio.timeout_at(deadline_at)
         if deadline_at is not None
@@ -825,7 +825,7 @@ async def handle_bounded(
     )
     try:
         async with bound:
-            return await handle(chain, context, on_routed)
+            return await handle(deps, context, on_routed)
     except TimeoutError as error:
         # 504 rather than 408, ruled 2026-08-22 and written into `client-side-block-delivery.md`.
         raise UpstreamTimeout(f"client request exceeded {deadline}s") from error

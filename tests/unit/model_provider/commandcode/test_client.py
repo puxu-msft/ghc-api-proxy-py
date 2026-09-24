@@ -227,7 +227,12 @@ def test_commandcode_client_fetches_the_provider_catalog_without_generation_aggr
         )
 
     config = CommandCodeProviderConfig.model_validate(
-        {"type": "commandcode", "api_key": "user_test", "zdr": True}
+        {
+            "type": "commandcode",
+            "api_key": "user_test",
+            "fingerprint_mode": "generated",
+            "zdr": True,
+        }
     )
     http = httpx2.AsyncClient(transport=httpx2.MockTransport(handler))
 
@@ -262,7 +267,12 @@ def test_commandcode_initialization_retries_after_partial_failure() -> None:
         )
 
     config = CommandCodeProviderConfig.model_validate(
-        {"type": "commandcode", "api_key": "user_test", "zdr": True}
+        {
+            "type": "commandcode",
+            "api_key": "user_test",
+            "fingerprint_mode": "generated",
+            "zdr": True,
+        }
     )
     http = httpx2.AsyncClient(transport=httpx2.MockTransport(handler))
 
@@ -298,7 +308,11 @@ def test_commandcode_initialization_refresh_window_requires_both_successes() -> 
         )
 
     config = CommandCodeProviderConfig.model_validate(
-        {"type": "commandcode", "api_key": "user_test"}
+        {
+            "type": "commandcode",
+            "api_key": "user_test",
+            "fingerprint_mode": "generated",
+        }
     )
     http = httpx2.AsyncClient(transport=httpx2.MockTransport(handler))
 
@@ -313,6 +327,42 @@ def test_commandcode_initialization_refresh_window_requires_both_successes() -> 
 
     asyncio.run(run())
     assert attempts == {FINGERPRINT_PATH: 1, LIFECYCLE_PATH: 1}
+
+
+def test_commandcode_initialization_skips_fingerprint_by_default() -> None:
+    attempts = {FINGERPRINT_PATH: 0, LIFECYCLE_PATH: 0}
+
+    def handler(request: httpx2.Request) -> httpx2.Response:
+        path = request.url.path
+        if path in attempts:
+            attempts[path] += 1
+            return httpx2.Response(204)
+        return httpx2.Response(
+            200,
+            content=(
+                b'{"type":"text-delta","text":"ok"}\n'
+                b'{"type":"text-end"}\n'
+                b'{"type":"finish","finishReason":"stop","totalUsage":{"outputTokens":1}}\n'
+            ),
+            headers={"content-type": "application/x-ndjson"},
+        )
+
+    config = CommandCodeProviderConfig.model_validate(
+        {"type": "commandcode", "api_key": "user_test"}
+    )
+    http = httpx2.AsyncClient(transport=httpx2.MockTransport(handler))
+
+    async def run() -> None:
+        try:
+            await CommandCodeClient(http, config).send(
+                {"params": {"model": "m", "messages": []}},
+                stream=False,
+            )
+        finally:
+            await http.aclose()
+
+    asyncio.run(run())
+    assert attempts == {FINGERPRINT_PATH: 0, LIFECYCLE_PATH: 1}
 
 
 def test_commandcode_client_reuses_fallback_session_without_interaction_header() -> None:

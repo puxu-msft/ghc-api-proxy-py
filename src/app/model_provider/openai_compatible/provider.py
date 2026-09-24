@@ -7,6 +7,7 @@ from typing import Any, cast
 import httpx2
 
 from app.config.schema import OpenAICompatibleProviderConfig
+from app.model_provider.model_info import load_model_info, merge_model_info
 from app.model_provider.openai_compatible.client import OpenAICompatibleClient
 from app.model_provider.types import (
     CatalogSnapshot,
@@ -17,6 +18,7 @@ from app.model_provider.types import (
     ModelDescriptor,
     ModelEndpoint,
     parse_prompt_token_limits,
+    parse_reasoning_efforts,
     require_descriptor_owner,
     require_endpoint,
     resolve_endpoints,
@@ -77,6 +79,12 @@ class OpenAICompatibleProvider:
         self._client = client
         self._config = config
         self._disabled = frozenset(config.disabled_models)
+        # Read once, at construction: this file is a restart-required setting like the
+        # addresses beside it, and a path that cannot be read must fail the start-up
+        # rather than quietly leave every model description as empty as upstream's.
+        self._model_info = (
+            load_model_info(config.model_info_json) if config.model_info_json.strip() else None
+        )
         self._catalog_generation = 0
         self._refreshed_at = ""
         self._raw_catalog: dict[str, Any] = {"object": "list", "data": []}
@@ -94,6 +102,15 @@ class OpenAICompatibleProvider:
     @property
     def catalog_refreshed_at(self) -> str:
         return self._refreshed_at
+
+    @property
+    def model_info_freshness(self) -> dict[str, Any] | None:
+        """Where the local model-info document came from, and how old its sample is.
+
+        Optional because only a bridge can be configured with one, and `/api/status`
+        reports it where it exists rather than forcing every provider to answer.
+        """
+        return None if self._model_info is None else self._model_info.freshness()
 
     @property
     def raw_catalog(self) -> Mapping[str, Any]:
@@ -145,6 +162,8 @@ class OpenAICompatibleProvider:
         refreshed_at = datetime.now(UTC).isoformat(timespec="seconds")
         allowed_models = frozenset(self._config.models)
         enabled_endpoints = self._enabled_direct_endpoints()
+        described = None if self._model_info is None else self._model_info.models
+        served: list[dict[str, Any]] = []
         descriptors: dict[str, ModelDescriptor] = {}
         for entry in cast(list[Any], entries):
             if not isinstance(entry, dict):
@@ -153,8 +172,21 @@ class OpenAICompatibleProvider:
             model_id = model.get("id")
             if not isinstance(model_id, str) or not model_id:
                 continue
-            if allowed_models and model_id not in allowed_models:
+            local = None if described is None else described.get(model_id)
+            if described is not None and local is None:
+                # The intersection is the point, and neither side answers it alone:
+                # upstream advertises models this file says nothing about, and the file
+                # names models upstream does not serve. What is left is what the
+                # operator has both confirmed and described.
                 continue
+            if allowed_models and model_id not in allowed_models:
+                # Before the merge, not after: `served` is what `/models` reads, and a
+                # model the allowlist just dropped must not reappear there merely
+                # because the local file happens to describe it.
+                continue
+            if local is not None:
+                model = merge_model_info(model, local)
+                served.append(model)
             advertised = _normalise_endpoints(model.get("supported_endpoints"))
             resolved = (
                 None
@@ -175,6 +207,9 @@ class OpenAICompatibleProvider:
                     if endpoint in enabled_endpoints
                     or endpoint is ModelEndpoint.OPENAI_EMBEDDINGS
                 )
+            reasoning_efforts = parse_reasoning_efforts(model)
+            if reasoning_efforts is None:
+                reasoning_efforts = self._config.reasoning_efforts.get(model_id)
             descriptors[model_id] = ModelDescriptor(
                 id=model_id,
                 endpoints=endpoints,
@@ -184,13 +219,22 @@ class OpenAICompatibleProvider:
                     if ModelEndpoint.OPENAI_CHAT_COMPLETIONS in endpoints
                     else None
                 ),
+                reasoning_efforts=reasoning_efforts,
                 provider_name=self._name,
                 catalog_generation=generation,
                 catalog_refreshed_at=refreshed_at,
                 prompt_token_limits=parse_prompt_token_limits(model),
             )
         self._descriptors = descriptors
-        self._raw_catalog = dict(raw)
+        if described is None:
+            self._raw_catalog = dict(raw)
+        else:
+            # `/models` reads its metadata straight out of the raw catalog, so the
+            # merged entries have to land here or the intersection would only decide
+            # which ids route while every description stayed as empty as upstream's.
+            catalog = dict(raw)
+            catalog["data"] = served
+            self._raw_catalog = catalog
         self._catalog_source = source
         self._catalog_generation = generation
         self._refreshed_at = refreshed_at
@@ -199,7 +243,11 @@ class OpenAICompatibleProvider:
         raw = await self._client.fetch_models()
         before = self._raw_catalog
         self.replace_catalog(raw)
-        return raw != before
+        # Compared after the merge, in both modes: the question is whether what this
+        # provider serves changed. Against the upstream payload it would answer "yes"
+        # on every refresh whenever a local file is in play, because the two are never
+        # equal then.
+        return self._raw_catalog != before
 
     async def send(
         self,
@@ -211,7 +259,6 @@ class OpenAICompatibleProvider:
         extra_headers: Mapping[str, str] | None = None,
         interaction_id: str | None = None,
     ) -> httpx2.Response:
-        del interaction_id
         require_descriptor_owner(descriptor, self._name)
         require_endpoint(descriptor, endpoint, self._name)
         if endpoint not in _SEND_METHODS:
@@ -221,6 +268,7 @@ class OpenAICompatibleProvider:
             payload,
             stream=stream,
             extra_headers=extra_headers,
+            interaction_id=interaction_id,
         )
 
     async def count_tokens(

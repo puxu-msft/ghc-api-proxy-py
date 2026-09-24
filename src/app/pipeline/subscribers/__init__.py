@@ -4,9 +4,9 @@
 
 **Why a registry rather than another function call.** The compatibility fixups are not one thing that grew — they are a family that keeps arriving one upstream rejection at a time, and each one that lands as a fresh call inside some existing function makes the next one harder to see, harder to order against its siblings, and impossible to exercise without standing up everything around it. A name and an event give each of them somewhere to live.
 
-**Protocol repair is not configurable, on purpose.** A request that upstream rejects whole is not a preference, so the sanitizers here have no switch. The operator-facing `hooks:` subscription points in `config.example.yaml` are a different layer with their own undecided question — what a list item names — and this package deliberately does not pre-empt that answer by inventing a key of its own.
+**Policy belongs to the pass that owns the behavior.** A request that upstream rejects whole is not an operator preference, so the required sanitizers here have no switch. Nonportable but valid client reasoning is different: the user chose named degradation by default with a configurable strict refusal. The operator-facing `hooks:` subscription points in `config.example.yaml` are a different layer; this package does not invent a hook key for either policy.
 
-**A compatibility reshape is the exception, and it is opt-in rather than mandatory.** This paragraph used to say the whole package was unconfigurable, which stopped being true with `builtin:repair-minted-reasoning-ids`: it repairs history this proxy damaged rather than a shape upstream refuses, it edits a body on a leg whose contract is to forward verbatim, and `.dev/docs/direct-passthrough/spec.md` §2.7 requires exactly that kind of pass to carry a declared, default-off switch. So the rule is per-pass and its own Spec clause decides: a sanitizer upstream forces has no key, a reshape this proxy chooses must have one.
+**A compatibility reshape may be opt-in.** `builtin:repair-minted-reasoning-ids` repairs history this proxy damaged on a leg whose contract is otherwise verbatim; `.dev/docs/direct-passthrough/spec.md` §2.7 requires its default-off switch. The reasoning-carrier policy instead follows `.dev/docs/reasoning-carrier/spec.md` §7.3, which requires the default to degrade with an explicit loss.
 
 ## Order
 
@@ -18,7 +18,7 @@
 | `builtin:repair-minted-reasoning-ids` | `attempt.prepare` | — | Nothing forces its position. It reads and edits `input`, which on this event nothing else touches: every neighbour works on `tools`, `messages` or `content`, and those belong to the Anthropic-shaped body. Off by default; `.dev/docs/direct-passthrough/spec.md` §6.5. |
 | `builtin:reasoning-encrypted-include` | `attempt.prepare` | — | Nothing forces its position. It reads and edits the top-level `include`, which on this event nothing else touches, and on the default policy it returns without reading the body at all. Registered next to `builtin:repair-minted-reasoning-ids` because both are Responses-body passes whose neighbour set is empty. |
 | `builtin:blank-text-blocks` | `attempt.prepare` | before `builtin:reasoning-carrier-last-mile` | This pass only removes text blocks that say nothing. Removing one can put two thinking blocks together, so the following pass owns the resulting Anthropic-only repair rather than this remover inventing a separator itself. |
-| `builtin:reasoning-carrier-last-mile` | `attempt.prepare` | **after `builtin:blank-text-blocks`** | Refuses every project or compatible synthetic carrier still present in provider-bound wire. On an Anthropic target only, it then owns the configured thinking adjacency repair. Running after blank removal means it sees the body actually being sent and leaves no second separator owner. |
+| `builtin:reasoning-carrier-last-mile` | `attempt.prepare` | **after `builtin:blank-text-blocks`** | On an Anthropic target, removes valid nonportable client carriers with a recorded loss by default, or refuses them in strict mode; malformed carriers always fail. It then repairs thinking adjacency. Running after blank removal means it sees the body actually being sent and leaves no second separator owner. |
 | `builtin:anthropic-cache-control-vocabulary` | `attempt.prepare` | **after `builtin:server-tool-capability`, by an explicit constraint** | It removes the `cache_control` keys upstream refuses from every marker in the body, and `server_tools.py` can put one back while rewriting a result. It only deletes fields, never blocks or messages, but it still precedes the final invariant assertion so the last subscriber observes the exact provider-bound body. |
 | `builtin:anthropic-trailing-assistant` | `attempt.prepare` | **after `builtin:reasoning-carrier-last-mile` and `builtin:anthropic-cache-control-vocabulary`** | It asserts an invariant over the finished provider-bound message list after the last block-moving and field-pruning passes. Stated with `after=` rather than by registration order because a constraint that matters should not be recoverable only by reading this table. |
 
@@ -33,6 +33,7 @@ from app.config.schema import (
     CacheControlMode,
     ReasoningEncryptedIncludePolicy,
     ThinkingDisplayPolicy,
+    UnportableReasoningCarrierPolicy,
 )
 from app.pipeline.direct_driver.base import EVENT_ATTEMPT_PREPARE
 from app.pipeline.events import SubscriberRegistry
@@ -80,6 +81,7 @@ def register_builtin_subscribers(
     thinking_efforts: Mapping[str, str] | None = None,
     thinking_display: ThinkingDisplayPolicy = "passthrough",
     assistant_message_layout: AssistantMessageLayout = "move_and_synthetic",
+    unportable_reasoning_carrier: UnportableReasoningCarrierPolicy = "degrade",
     cache_control: CacheControlMode = "sanitize",
     cache_control_sanitize: Sequence[tuple[re.Pattern[str], frozenset[str]]] = (),
     repair_minted_reasoning_ids_enabled: bool = False,
@@ -144,6 +146,7 @@ def register_builtin_subscribers(
         lambda context: guard_and_layout_reasoning(
             context,
             assistant_message_layout=assistant_message_layout,
+            unportable_reasoning_carrier=unportable_reasoning_carrier,
         ),
         # Blank removal may put two thinking blocks together. This pass is the sole owner of repairing that final Anthropic shape.
         after=(BLANK_TEXT_BLOCKS_ID,),

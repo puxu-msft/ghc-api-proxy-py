@@ -31,6 +31,7 @@ type WebSearchConstraintPolicy = Literal["error", "drop_fields"]
 type AutoModeDecision = Literal["passthrough", "allow", "block"]
 # What this proxy does with the `include` entry that asks a Responses upstream for encrypted reasoning. Encrypted reasoning is opt-in on that wire: only a request carrying `reasoning.encrypted_content` in its `include` array gets the opaque seal back, and every other spelling returns summary text alone. `passthrough` — the default — adds nothing and strips nothing, so a translated request sends no `include` at all and a native request forwards the client's own array verbatim; `always_add` makes sure every Responses-bound request carries the entry, which is what cross-turn reasoning reuse needs on a `store: false` upstream; `always_strip` removes the entry wherever it appears, and drops an `include` key left empty by the removal.
 type ReasoningEncryptedIncludePolicy = Literal["passthrough", "always_add", "always_strip"]
+type UnportableReasoningCarrierPolicy = Literal["degrade", "refuse"]
 type ConnectionBoundInputIdPolicy = Literal["abandon", "strip_reasoning", "strip_all"]
 # What to do with `thinking.display` on the way to an Anthropic Messages upstream. `passthrough` — the default — sends whatever the client said and adds nothing; `drop` removes the key; the two remaining values rewrite it. `omitted` streams `thinking` blocks with empty text and is the upstream default on the Claude 5 family, `summarized` asks for a readable summary of the reasoning instead.
 type ThinkingDisplayPolicy = Literal["passthrough", "drop", "omitted", "summarized"]
@@ -45,6 +46,8 @@ type AnthropicThinkingMode = Literal["adaptive", "enabled"]
 # They are pinned and reported as restart-required rather than silently applied.
 NOT_HOT_RELOADABLE = frozenset(
     {
+        "model_providers.*.add_header_authorization",
+        "model_providers.*.add_header_x_opencode_session",
         "model_providers.*.anthropic_messages_endpoint",
         "model_providers.*.api_base_url",
         "model_providers.*.openai_chat_completions_endpoint",
@@ -60,6 +63,7 @@ NOT_HOT_RELOADABLE = frozenset(
         "model_providers.*.install_id",
         "model_providers.*.api_key",
         "model_providers.*.models",
+        "model_providers.*.model_info_json",
         "model_providers.*.route_target",
         "model_providers.*.type",
         "model_providers.*.user_agent",
@@ -67,7 +71,10 @@ NOT_HOT_RELOADABLE = frozenset(
         "model_providers.*.project_slug",
         "model_providers.*.zdr",
         "model_providers.*.initialize_upstream",
+        "model_providers.*.fingerprint_mode",
+        "model_providers.*.fingerprint_snapshot_file",
         "model_providers.*.empty_system_placeholder",
+        "model_translation.to_anthropic_messages.unportable_reasoning_carrier",
         "pidfile_dir",
         "proxy",
         "reactive_rate_limiter",
@@ -82,8 +89,15 @@ NOT_HOT_RELOADABLE = frozenset(
 
 # Fields shared with an older provider but fixed into provider instances at startup. Kept type-scoped so this feature does not silently change the existing GitHub Copilot hot-reload contract.
 PROVIDER_NOT_HOT_RELOADABLE: dict[str, frozenset[str]] = {
-    "bridge": frozenset({"disabled_models", "model_refresh_interval"}),
-    "commandcode": frozenset({"disabled_models", "model_refresh_interval"}),
+    "bridge": frozenset({"disabled_models", "model_refresh_interval", "reasoning_efforts"}),
+    "commandcode": frozenset(
+        {
+            "disabled_models",
+            "model_refresh_interval",
+            "fingerprint_mode",
+            "fingerprint_snapshot_file",
+        }
+    ),
     "xingchen": frozenset({"disabled_models"}),
 }
 
@@ -246,7 +260,20 @@ class CommandCodeProviderConfig(_ModelProviderConfigBase):
     command_code_version: str = "0.32.3"
     zdr: bool = False
     initialize_upstream: bool = True
+    fingerprint_mode: Literal["off", "captured", "generated", "explicit"] = "off"
+    fingerprint_snapshot_file: str = ""
     empty_system_placeholder: bool = True
+
+    @model_validator(mode="after")
+    def _fingerprint_mode_has_required_snapshot(self) -> CommandCodeProviderConfig:
+        if (
+            self.fingerprint_mode in {"captured", "explicit"}
+            and not self.fingerprint_snapshot_file.strip()
+        ):
+            raise ValueError(
+                "fingerprint_snapshot_file is required for captured or explicit fingerprint mode"
+            )
+        return self
 
     @field_validator(
         "api_base_url",
@@ -304,12 +331,33 @@ class OpenAICompatibleProviderConfig(_ModelProviderConfigBase):
     api_key: str = Field(default="", repr=False)
     models: list[str] = Field(default_factory=list)
     model_refresh_interval: int = Field(default=3600, ge=0)
+    # Local model metadata for an upstream that publishes ids and nothing else.
+    # When set, this file and the upstream `/models` are intersected: a model is
+    # served only if both name it, and the entry here supplies the fields upstream
+    # left out. Empty means the upstream catalog is taken as published.
+    # May contain `$VAR`, `${VAR:-fallback}` and `${GHC_PACKAGE_DIR}` (the installed
+    # package itself, for referencing a shipped snapshot without a checkout); expanded
+    # by `app.config.paths.expand_user_path`.
+    model_info_json: str = ""
+    # Fallback capability facts for a model catalog that omits
+    # `capabilities.supports.reasoning_effort`. Catalog data wins when it
+    # publishes the field, including an explicit empty list.
+    reasoning_efforts: dict[str, tuple[str, ...]] = Field(
+        default_factory=lambda: dict[str, tuple[str, ...]]()
+    )
     # A bridge upstream does not necessarily serve all three native protocols
     # directly; these three independently declare per-protocol capability and
     # address (Anthropic Messages also gates upstream `count_tokens`).
     openai_chat_completions_endpoint: EndpointSetting = ""
     openai_responses_endpoint: EndpointSetting = ""
     anthropic_messages_endpoint: EndpointSetting = ""
+    # Upstream auth is shaped by the protocol, not by the provider: the Anthropic
+    # Messages leg is an Anthropic API and authenticates with `x-api-key`, while the
+    # OpenAI legs authenticate with `Authorization: Bearer`. These two flags add a
+    # header on top of that default for the gateways that want more — an
+    # `Authorization` beside `x-api-key`, and a per-conversation session id.
+    add_header_authorization: bool = False
+    add_header_x_opencode_session: bool = False
 
     @field_validator("api_base_url")
     @classmethod
@@ -373,6 +421,33 @@ class OpenAICompatibleProviderConfig(_ModelProviderConfigBase):
         canonical = [_canonical_model_name(model) for model in value]
         if len(canonical) != len(set(canonical)):
             raise ValueError("models may not contain canonically equivalent ids")
+        return value
+
+    @field_validator("reasoning_efforts")
+    @classmethod
+    def _reasoning_effort_overrides_are_addressable(
+        cls,
+        value: dict[str, tuple[str, ...]],
+    ) -> dict[str, tuple[str, ...]]:
+        for model_id, efforts in value.items():
+            if not model_id.strip():
+                raise ValueError("reasoning_efforts may not contain an empty model id")
+            if model_id != model_id.strip():
+                raise ValueError(
+                    "reasoning_efforts model ids may not have leading or trailing whitespace"
+                )
+            if any(not effort.strip() for effort in efforts):
+                raise ValueError(
+                    f"reasoning_efforts for {model_id!r} may not contain a blank effort"
+                )
+            if any(effort != effort.strip() for effort in efforts):
+                raise ValueError(
+                    f"reasoning_efforts for {model_id!r} may not have leading or trailing whitespace"
+                )
+            if len(efforts) != len(set(efforts)):
+                raise ValueError(
+                    f"reasoning_efforts for {model_id!r} may not contain duplicates"
+                )
         return value
 
 
@@ -523,6 +598,7 @@ class ThinkingTargetProfileConfig(Section):
 
 
 class ToAnthropicMessagesConfig(Section):
+    unportable_reasoning_carrier: UnportableReasoningCarrierPolicy = "degrade"
     thinking_profiles: dict[str, ThinkingTargetProfileConfig] = Field(
         default_factory=lambda: dict[str, ThinkingTargetProfileConfig]()
     )
