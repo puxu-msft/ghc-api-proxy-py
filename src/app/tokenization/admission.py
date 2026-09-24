@@ -1,3 +1,4 @@
+import os
 from collections.abc import Mapping
 from dataclasses import dataclass, replace
 from enum import StrEnum
@@ -8,6 +9,7 @@ import tiktoken
 from anyio.to_process import run_sync
 
 from app.model_provider.types import ModelDescriptor, PromptTokenLimits
+from app.tokenization.worker_process import in_worker_process
 
 OPENAI_RESPONSES = "openai-responses"
 SUPPORTED_ADMISSION_TOKENIZERS = frozenset({"o200k_base"})
@@ -517,6 +519,8 @@ class PromptTokenAdmission:
         largest_counted: tuple[_TextCandidate, int] | None = None
         for candidate in to_count:
             count = await run_sync(
+                in_worker_process,
+                os.getpid(),
                 _count_ordinary,
                 limits.tokenizer,
                 candidate.text,

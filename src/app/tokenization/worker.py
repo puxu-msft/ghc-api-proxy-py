@@ -1,3 +1,4 @@
+import os
 from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Any
@@ -16,6 +17,7 @@ from app.tokenization.estimators import (
 )
 from app.tokenization.features import analyze_responses_input
 from app.tokenization.types import EstimateFeatures, TokenizationCapabilities
+from app.tokenization.worker_process import in_worker_process
 
 
 @dataclass(frozen=True, slots=True)
@@ -88,6 +90,8 @@ class LocalTokenWorker:
     ) -> TokenEstimate:
         if capabilities is None:
             result = await run_sync(
+                in_worker_process,
+                os.getpid(),
                 _estimate_input,
                 protocol,
                 payload,
@@ -96,6 +100,8 @@ class LocalTokenWorker:
             )
         else:
             result = await run_sync(
+                in_worker_process,
+                os.getpid(),
                 _estimate_input,
                 protocol,
                 payload,

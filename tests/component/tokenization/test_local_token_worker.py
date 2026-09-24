@@ -1,6 +1,8 @@
 import asyncio
 import json
+import os
 import pickle
+import signal
 import time
 from collections.abc import Callable
 from pathlib import Path
@@ -52,6 +54,13 @@ def failed_estimate(_protocol: str, _payload: dict[str, Any]) -> TokenEstimate:
         ),
         ValueError("synthetic encoding failure"),
     )
+
+
+def interrupted_estimate(_protocol: str, _payload: dict[str, Any]) -> TokenEstimate:
+    # What the tty driver does on Ctrl+C: SIGINT to every process in the foreground group, this worker included, while it is mid-estimate.
+    os.kill(os.getpid(), signal.SIGINT)
+    time.sleep(0.05)
+    return TokenEstimate(17, ())
 
 
 @pytest.fixture(autouse=True)
@@ -184,6 +193,29 @@ async def wait_for_file(file: Path) -> None:
     async with asyncio.timeout(5):
         while not file.exists():
             await asyncio.sleep(0.01)
+
+
+@pytest.mark.real_process
+async def test_a_terminal_interrupt_in_a_worker_does_not_come_back_as_the_servers(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A Ctrl+C is the server's to handle, not a result a worker hands back.
+
+    Before workers ignored SIGINT, AnyIO returned the worker's `KeyboardInterrupt` as the call's outcome and the server re-raised it inside the waiting task, where asyncio treats it as fatal to the loop: a foreground `ghc-api-proxy start` then lost its graceful shutdown to `CancelledError` in `token_learning.close()` (2026-09-23). Caught here so that a regression fails this test instead of aborting the session.
+    """
+    monkeypatch.setattr(worker_module, "_estimate_input", interrupted_estimate)
+    server_handler = signal.getsignal(signal.SIGINT)
+
+    try:
+        tokens = await asyncio.wait_for(
+            LocalTokenWorker().estimate("openai-responses", {"model": "model", "input": []}),
+            timeout=20,
+        )
+    except KeyboardInterrupt:
+        pytest.fail("the worker's SIGINT came back as the server's KeyboardInterrupt")
+
+    assert tokens == 17
+    assert signal.getsignal(signal.SIGINT) is server_handler
 
 
 def controlled_payload(directory: Path, name: str) -> tuple[dict[str, str], Path, Path]:
