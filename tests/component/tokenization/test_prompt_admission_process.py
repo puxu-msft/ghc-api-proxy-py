@@ -15,6 +15,9 @@ from app.tokenization.admission import (
     TokenAdmissionOutcome,
 )
 
+# A hang guard, not a latency bound. A cold worker is a fresh interpreter importing the app under coverage: about 2.3 s on an idle machine and past 5 s with 14 of 16 cores busy (2026-09-24), which failed the real-process tests with and without the change under test alike. Promptness is asserted separately.
+WORKER_START_SECONDS = 30
+
 
 def descriptor(
     *,
@@ -88,7 +91,7 @@ async def test_real_process_cancellation_releases_capacity_for_the_next_count(
             payload={"model": "gpt-model", "input": first_text},
         )
     )
-    async with asyncio.timeout(5):
+    async with asyncio.timeout(WORKER_START_SECONDS):
         while not first_entered.exists():
             await asyncio.sleep(0.01)
 
@@ -120,7 +123,7 @@ async def test_real_process_cancellation_releases_capacity_for_the_next_count(
             descriptor=model,
             payload={"model": "gpt-model", "input": second_text},
         ),
-        timeout=5,
+        timeout=WORKER_START_SECONDS,
     )
     assert observed.outcome is TokenAdmissionOutcome.REJECTED
     assert second_entered.exists()
@@ -156,7 +159,7 @@ async def test_real_process_counts_share_one_worker_capacity(
         )
     )
     try:
-        async with asyncio.timeout(5):
+        async with asyncio.timeout(WORKER_START_SECONDS):
             while not (
                 limiter.statistics().tasks_waiting == 1
                 and int(first_entered.exists()) + int(second_entered.exists()) == 1
@@ -168,7 +171,7 @@ async def test_real_process_counts_share_one_worker_capacity(
             first_release.write_text("go", encoding="utf-8")
         else:
             second_release.write_text("go", encoding="utf-8")
-        async with asyncio.timeout(5):
+        async with asyncio.timeout(WORKER_START_SECONDS):
             while not (first_entered.exists() and second_entered.exists()):
                 await asyncio.sleep(0.01)
     finally:

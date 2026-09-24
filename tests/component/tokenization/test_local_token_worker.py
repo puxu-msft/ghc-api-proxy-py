@@ -30,6 +30,9 @@ from app.tokenization.types import (
 )
 from app.tokenization.worker import LocalTokenWorker, TokenEstimate
 
+# A hang guard, not a latency bound. A cold worker is a fresh interpreter importing the app under coverage: about 2.3 s on an idle machine and past 5 s with 14 of 16 cores busy (2026-09-24), which failed the real-process tests with and without the change under test alike. Promptness is asserted separately.
+WORKER_START_SECONDS = 30
+
 
 def controlled_count(_tokenizer: str, text: str) -> int:
     control = json.loads(text)
@@ -190,7 +193,7 @@ async def test_real_worker_keeps_estimation_failure_and_stage_metrics(monkeypatc
 
 
 async def wait_for_file(file: Path) -> None:
-    async with asyncio.timeout(5):
+    async with asyncio.timeout(WORKER_START_SECONDS):
         while not file.exists():
             await asyncio.sleep(0.01)
 
@@ -209,7 +212,7 @@ async def test_a_terminal_interrupt_in_a_worker_does_not_come_back_as_the_server
     try:
         tokens = await asyncio.wait_for(
             LocalTokenWorker().estimate("openai-responses", {"model": "model", "input": []}),
-            timeout=20,
+            timeout=WORKER_START_SECONDS,
         )
     except KeyboardInterrupt:
         pytest.fail("the worker's SIGINT came back as the server's KeyboardInterrupt")
@@ -265,7 +268,7 @@ async def test_real_worker_can_be_cancelled_while_running_and_queued(
         assert not fallback_used
         assert limiter.borrowed_tokens == 0
         release_b.touch()
-        assert await asyncio.wait_for(worker.estimate("openai-responses", payload_b), timeout=5) == 17
+        assert await asyncio.wait_for(worker.estimate("openai-responses", payload_b), timeout=WORKER_START_SECONDS) == 17
         assert entered_b.exists()
     finally:
         release_a.touch()
