@@ -5,6 +5,8 @@
 
 权威：[`.dev/docs/direct-passthrough/spec.md`](../docs/direct-passthrough/spec.md) §6.5（用户 2026-09-01 裁决：「加，按窄形态 ＋ 显式 opt-in」）。
 
+2026-09-09 用户：已手工采纳，可删除本文档。
+
 ## 建议摘取的片段
 
 现有示例文件里，`hook_fix_responses_request:` 这一段**已经存在但整段注释掉**（约 596 行），里面是 `rename_call_id_as_fc_id`。建议在同一段内追加：

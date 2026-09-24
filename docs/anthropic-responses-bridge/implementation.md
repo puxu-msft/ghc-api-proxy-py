@@ -1,7 +1,10 @@
 # Anthropic Messages ↔ OpenAI Responses bridge 实施状态与动态收敛计划
 
+- **2026-09-15 effort capability repair（当前代码切片）**：bridge provider 现在把 catalog 的 `capabilities.supports.reasoning_effort` 投影到 `ModelDescriptor`；当 bridge catalog 省略该字段时，`model_providers.<name>.reasoning_efforts` 可按 resolved model id 提供 fallback，catalog 显式列表（含空列表）优先。该 map 被标记为 provider restart-only，避免热重载只更新 config snapshot 而不更新已构造 provider。`/v1/models?format=pi` 也从同一个 descriptor snapshot 投影有效 reasoning 能力。公开 `/v1/messages`、`/v1/messages/count_tokens` 回归覆盖默认 `high`、显式 `xhigh`、显式 `none`、count prepare parity、fallback 缺失时的 structured `reasoning_effort: null`；targeted Ruff/Pyright 已通过。当前代码与测试尚未形成提交或完整 suite 终态。
+
 ## 文档状态
 
+- **2026-09-14 Responses 路径对比结论已落入本 living plan**：本轮只记录用户提供的已完成 `gim` Responses 覆盖清单、我方优势、优先缺口与 P0／P1／P2 收敛顺序；它不是新的行为 oracle，也不把 `gim` 的简化实现替代 current Spec。当前文档锚点为 `main@3169468fb32a`；本轮只改本文，不改生产代码、测试、Spec、Acceptance、分支或 commit。`gim` 的 Chat Completions 不在本轮参考、分析或实施范围内。
 - **用途与状态**：本文是 Implementation living document，记录正式规格进入实现后的渐进切片、评审门、待修项、下一最小切片、并行开发线与本地分支收敛策略。开始开发不等于本文收口；一次提交也只是可追溯 checkpoint，不把本文转成只读历史快照。
 - **历史事实快照**：2026-08-08。主仓为 `/home/xp/src/ghc-api-proxy-py`，当时 `main` HEAD 为 `c1de6bf800a062f0dbcb4ef9db507fdc5f323b62`。本轮每次 shell 调用都在同一调用内验证物理 repo root、分支 `main`、`HEAD == refs/heads/main == c1de6bf800a062f0dbcb4ef9db507fdc5f323b62`；未来 `main` 前进后，living document 必须先记录新锚点并重建 gate，不得把本快照冒充未来 HEAD。
 - **权威边界**：[规格](spec.md)是唯一 current 行为 oracle；任何 required behavior 与 policy-dependent expected 只能来自它的当前内容，不再由本文复制内容hash或`FINALIZED`标签判定。[独立验收规范](acceptance.md)只把 current Spec 合同转成可执行判据，不得自行补充 expected；2026-09-03 effort amendment 的复核状态由[评审报告](reports/260903-review-effort-translation-spec.md)与[处置账](review-disposition-effort-translation.md)唯一记录，尚有open项时不得把旧 Acceptance verdict当作当前放行依据。该状态不构成候选产品或完整 bridge 的`PASS`，产品继续为`UNVERIFIED`。[目标架构](architecture.md)仅是非规范实现参考；`D-ARCH`／`D-MIGRATION`未经用户接受前不产生behavior或expected。[研究](research.md)保留来源、可移植机制与不可照搬项，不是行为或验收oracle。
@@ -269,9 +272,120 @@ request 切片基于 reasoning squash：`cb286059b656d960225c2afff84f204b9123810
 
 Main上的foundations、systemd runtime、happy、usage、semantic、route、block、capability、History、stream、S3、S4、stream request facts、network retry、Copilot identity及tool／reasoning最小纵向切片均保持独立语义提交；出现组合回归时先定位到引入缺陷的最低共同层，再按提交依赖逆序形成显式revert，不把“最新提交”自动当作根因，也不整文件恢复相邻切片。原reviewed HEAD仍由archive ref保留；回滚只改变main上的集成提交，不移动archive ref，也不覆盖评审证据。2026-08-08 快照锚点为`main@c1de6bf800a062f0dbcb4ef9db507fdc5f323b62`，`main` 其后已继续前进，两片 resident 切片的机制已由 `546852a` 删除；旧successor、旧bridge-next与旧systemd integration只保留provenance。后续边界验证若发现代码缺口，必须从current main建立新切片，不复用旧identity、S4、request-facts、network-retry、resident primitive或wiring candidate／integration identity。
 
+### 2026-09-08 翻译 seam 收敛切片（当前工作树）
+
+本切片把 Responses item、terminal、usage 与 event framing 的共享语义收进 `app.pipeline.translation_driver`，流式 `ResponsesAssembler` 和 buffered response codec 共同使用同一 item normalizer；`ResponsesObserver` 使用同一 event parser；Responses→Anthropic 非流式 codec 保留 upstream identity 并生成稳定 opaque public message id。tool-search／hosted-search facts 已从 `context.extras` 提升为 `RequestContext` typed facts，`HandledRequest` 与 `DeliveryPlan` 从 driver 中抽出，stream replay 的 attempt opening 和 delivery-plan construction 回到 driver，retry 默认复用 post-prepare target payload，显式 target-format change 才从当前 wire payload 通过 decode／encode adapter 重建并使用 request-lifetime options snapshot。旧 `app.protocols` 目录及其活测试已退休，生产路径不再存在第二套 legacy converter。Responses stream unknown item 现在保留 source-scoped opaque payload、skip 并发布 structured warning，不再拒绝整个可交付 turn。
+
+候选 source `worktree-260908-translation-shape@38a123c0` 加上 `438088db` 的 retry seam 修复，经候选 R2 与主树 merged-state R2 评审均为 0 blocker／0 major／0 minor；该语义已应用到 current main 工作树，但尚未形成只含本切片的 main squash commit，因为主树仍有并行未提交改动。当前长期形状定向回归 642 passed，Ruff 与 Pyright 通过；主树全量 unit 为 2933 passed、1 failed，唯一失败是 `tests/unit/config/test_config_schema.py::test_authoritative_example_config_parses` 的当前配置样例／schema 漂移，不涉及本切片路径。整体产品仍保持 `UNVERIFIED`，本切片不构成部署或 cutover 证据。
+
+## 2026-09-14 Responses 对比结论与分阶段计划
+
+本节记录已完成的 `gim` Responses 路径对比。它的身份是实施状态、证据边界与后续计划，不是新的行为规范；任何实现目标都必须先回到 current [Spec](spec.md) 与 [Acceptance](acceptance.md) 的现有合同。对比清单不构成“与 `gim` parity”的承诺，也不授权把参考实现的简化生命周期、loss 或默认值移植进本项目。
+
+### 对比覆盖清单（仅 Responses）
+
+- **入口与准入**：`/responses` 与 `/v1/responses` 路由、model capability admission、`service_tier=null`。
+- **请求与工具**：`apply_patch`／custom tool、compaction、raw／准 raw SSE，以及 Anthropic→Responses 的 system、text、image、function tool、`tool_result`、`tool_choice`、`parallel_tool_calls` 与 `output_config.effort`。
+- **Web search 与跨轮历史**：domain、location、`max_uses`、source citation，以及多轮 search history。
+- **响应、错误与流**：Responses→Anthropic 的 refusal、function call、stop reason、usage、error；流式 `output_text`、`function_call`、`web_search`、citation 与 terminal 事件。
+
+本清单明确不引入 `gim` 的 Chat Completions 支持，也不把 Chat Completions 作为本 bridge 的中间层或后续隐式 fallback。
+
+### 我方当前优势（必须保留）
+
+1. **能力未知 fail-closed**：不凭模型名或邻近字段猜测 Responses 能力，未知或矛盾 capability 在网络调用前拒绝。
+2. **reasoning proxy carrier**：使用 current Spec 规定的项目主 carrier 与兼容 consumer，保留跨轮 opaque reasoning continuation；不改成参考实现的有损聚合。
+3. **block-level delivery**：完整 Anthropic semantic block 才是下游提交单位，不退化为 token／event live forwarding。
+4. **较严格的 Responses lifecycle／terminal 方向**：单一 lifecycle owner、严格 terminal 与 error 边界、post-commit 不重复提交的方向不因对比而放宽。
+5. **usage 与 stream／non-stream 语义分层**：usage、terminal、stream framing 与语义转换各自有 typed seam，不以 raw SSE 形状代替 Anthropic 结果合同。
+
+### 对比报告发现的优先缺口
+
+| 优先级 | 当前缺口 | 现阶段处置 |
+|---|---|---|
+| P0 | malformed response lifecycle 可能默认成功；refusal content part 尚未作为独立语义稳定处理 | 先补现有 Spec 的 malformed／terminal `REJECT` 与 refusal `TRANSFORM＋DEGRADE` 合同，非流、流式和公开 route 同时闭合 |
+| P1 | malformed usage 与 absent usage 尚未区分；reasoning item 截断检测未闭合；opaque 与 malformed 边界需按 2026-09-11 current Spec 对齐；负向测试与真实 upstream cassette 证据不足 | 先建立独立 expected、typed facts 与失败分类，再用真实 raw cassette 和 deterministic local fault 分开证明 |
+| P2 | 尚需评估图片 admission、非文本 `tool_result`、web-search domain restriction／loss、stop-reason loss、Responses 专属 item 的明确拒绝／降级策略，以及 background、previous-response、audio、annotations、image-output、MCP、custom、file-search、WebSocket 的能力边界 | 以 capability／字段矩阵逐项定界；支持、opaque／skip、structured warning 或 reject 均必须回到 current Spec，不因对比清单自动扩大范围 |
+
+上述缺口是 implementation／evidence findings，不是对 Spec 的重写。当前 Spec 已经规定 unknown capability fail-closed、reasoning carrier、block-level buffering、single lifecycle／strict terminal、refusal、usage、stop reason 以及 opaque-versus-malformed 的基本方向；本轮**未发现必须修订 Spec 才能继续正确实施的点**。若后续 P0～P2 的实测与用户已裁决行为冲突，先停在 Spec 修订与 revision record，再进入代码切片；不得用 Implementation 或报告替代 Spec。
+
+### P0：先阻止 malformed 成功假象并闭合 refusal 语义
+
+**实现目标**
+
+1. 对缺失、重复、乱序或相互冲突的 Responses terminal／lifecycle，沿现有 typed error／partial-failure 合同结束；不得因 clean EOF、item done 或默认分支生成成功 terminal。
+2. 把 refusal content part 作为独立 semantic fact 与可观察内容处理；非流与流式保持顺序、error／degrade provenance 与 Anthropic response／SSE 一致，不把 refusal 无标记伪装成普通成功文本。
+3. 保持 project reasoning carrier、block-level buffering、single owner、严格 terminal 与 post-commit frontier，不以修 P0 为由引入第二套 parser 或 raw passthrough。
+
+**测试与真实 cassette 证据**
+
+- `AUTO-UNIT`／`AUTO-COMPONENT`：为 missing／duplicate／post-terminal／conflicting terminal、clean EOF 与 refusal part 建独立正反 fixture；expected 由 current Spec／Acceptance 的静态对象产生，不由产品 codec 生成。
+- `AUTO-HTTP`：从真实 Anthropic Messages route 覆盖 non-stream 与 stream，断言 refusal 既不丢失也不折成无标记普通 text，malformed lifecycle 不产生成功 terminal 或 `completed` History。
+- `CAPTURE-CORPUS`／真实 cassette：至少取得一个真实 upstream refusal 与一个正常 terminal（含可观察 usage／error framing）的 SDK-before raw HTTP／SSE cassette，并保留原始 event／chunk boundary。真实 upstream 无法确定地产生 malformed lifecycle 时，不伪造 live 证据；用 `LOCAL-FAULT`／固定 raw corpus 证明该失败轴。
+
+**明确不做**
+
+- 不在 P0 扩大 Responses 专属 item、WebSocket、web search 或图片支持。
+- 不把 `gim` 的 raw／准 raw SSE 或简化 terminal 当作实现替代。
+- 不参考、不实现 `gim` 的 Chat Completions，不新增 Chat Completions route、中间层或 fallback。
+- 不修改 Spec；若发现 current 合同本身不足，先报告并停在裁决边界。
+
+**阶段出口**：P0 只有在 malformed lifecycle 不再默认成功、refusal 双路径有独立事实且其 scoped tests／cassette／local-fault provenance 可追溯后，才进入 P1；产品总体仍为 `UNVERIFIED`。
+
+### P1：收紧 usage、reasoning 截断与 opaque 边界，并补证据
+
+**实现目标**
+
+1. 明确区分合法 absent usage、存在但 malformed usage、以及 upstream error／incomplete terminal；分别落到 current Spec 规定的 normalized usage、typed degradation 或 stable error，不以默认零值掩盖 malformed。
+2. 闭合 reasoning item 的截断检测：以 authoritative item／response lifecycle、terminal 与 clean EOF 事实判定，缺少合法终态时不得提交成功 block、usage 或 `History completed`。
+3. 按 2026-09-11 current Spec 统一边界：未知但结构可保留的 response item／part 进入 source-scoped opaque、skip 与 structured warning；source／lifecycle／assembler invariant malformed 进入 `REJECT`；不得把二者互相伪装。
+4. 建立负向测试与真实 upstream cassette 的最小证据集，覆盖 stream／non-stream 与 retry attempt isolation，而不是只补 happy path。
+
+实施 P1 前先复核并同步 Acceptance 的旧转录：当前 `NS-01` 仍把 future unknown item 写成 `REJECT`，而 current Spec 的 response-side unknown structure 是 opaque／skip／structured warning；`REQ-04` 对 web search 的旧 no-revive 表述也必须与 current Spec 及 `hosted-web-search-spec.md` 的已裁决范围对齐。两处是验收转录问题，不是本轮新增 Spec 规则；在同步前不得用旧 Acceptance 文字反向收紧实现。
+
+**测试与真实 cassette 证据**
+
+- `AUTO-UNIT`／`AUTO-COMPONENT`：usage present／absent／malformed 三分 fixture；reasoning `.added`／`.done`、missing authoritative done、clean EOF、truncation、unknown item 与 malformed lifecycle 的单侧缺陷注入；opaque skip 与 malformed reject 各有独立 oracle。
+- `AUTO-HTTP`／`LOCAL-FAULT`：随机 rechunk、clean EOF、RST、terminal 后事件、partial item 与 retry frontier，验证 block-level delivery、usage／History 与 terminal 不被失败 attempt 污染。
+- `CAPTURE-CORPUS`／真实 cassette：优先录制真实 Responses raw SSE 的正常 usage、reasoning item（含 `.added`／`.done`）与 terminal；若真实 upstream 没有稳定的 absent／malformed 形状，只把“未观察”记录为证据边界，用本地确定性 corpus 验证失败机制。cassette 必须位于产品 parser／SDK 前并保留 chunk boundary。
+
+**明确不做**
+
+- 不改变 current Spec 的 usage 算式、reasoning carrier 或 block-level delivery 规则。
+- 不把 unknown item 变成空 text、正常 terminal 或静默丢弃，也不把所有 unknown 一律扩大为 reject。
+- 不在 P1 顺带支持 background、previous-response、audio、annotations、image-output、MCP、custom、file-search 或 WebSocket。
+- 不参考、不实现 `gim` 的 Chat Completions；不建立第二个语义中间表示或第二个 lifecycle owner。
+
+**阶段出口**：P1 需同时有 present／absent／malformed usage 的可区分结果、reasoning 截断的失败证据、opaque／malformed 边界的负向控制，以及至少一组真实 raw cassette；否则保持 `UNVERIFIED` 并不得宣称 bridge lifecycle 已闭合。
+
+### P2：逐项定界 capability admission 与 Responses 专属语义
+
+**实现目标**
+
+1. 为图片 admission、非文本 `tool_result`、web-search domain restriction／loss、stop-reason loss 建立字段级矩阵与 route-level capability gate；已有 Spec 明确 `REJECT` 的项先证明零 upstream，已有 `DEGRADE`／opaque 的项证明 loss fact 与 warning。
+2. 对 Responses 专属 item 与能力边界逐项作出可审计结论：background、previous-response、audio、annotations、image-output、MCP、custom、file-search 与 WebSocket 分别判定支持、明确 reject，或 source-scoped opaque／skip／structured warning；不以“Responses 可表示”推导“本 bridge 已支持”。
+3. 对 `gim` 清单中的 `apply_patch`／custom tool、compaction、`service_tier=null`、raw／准 raw SSE 等只保留 comparison inventory 身份；若要进入产品范围，必须先有 current Spec／Acceptance 归属和独立 capability／loss 证据。
+
+**测试与真实 cassette 证据**
+
+- `AUTO-UNIT`／`AUTO-COMPONENT`／`AUTO-HTTP`：图片 base64／URL、image limit／unknown admission；文本／error／多模态 `tool_result`；已知与未知 stop reason；Responses 专属 item 的正反 capability fixtures。任何不支持项都断言稳定结果、零误调用或 structured warning，不允许 silent drop。
+- `CAPTURE-CORPUS`／真实 cassette：在 upstream 可确定触发时录制 image、web-search（domain、location、`max_uses`、source citation、多轮 history）、function／stop reason 与 tool-result 的真实 HTTP／SSE；对无法稳定触发的专属 item 或 WebSocket，不伪造真实 cassette，保留明确 `UNVERIFIED` 或 `LOCAL-FAULT` 证据边界。
+- `AUTO-WS`（仅在产品决定保留该物理 transport 时）：验证 HTTP／WebSocket 共享 semantic core 与 lifecycle；没有当前 Spec／transport owner 前，不把 WebSocket 形状写成已支持。
+
+**明确不做**
+
+- 不追求与 `gim` 的全量 parity，不复制其默认值、loss、简化 lifecycle 或 raw passthrough。
+- 不因 comparison inventory 自动开放 server／hosted tool、background、MCP、file-search、image-output 或 WebSocket。
+- 不参考、不实现 `gim` 的 Chat Completions，亦不把 Chat Completions 加入任何 Responses bridge 路由。
+- 不进行 `4141` cutover、服务重启、部署或其它与本计划无关的运行态接管。
+
+**阶段出口**：每个 P2 item 都有 Spec 归属、capability／loss 结果、负向控制与真实 cassette 或明确不可观测边界；在此之前仍只报告 scoped evidence，不升级完整产品 verdict。
+
 ## 下一步
 
 以下是 current snapshot 的执行顺序，不是把 Implementation 收口的一次性清单。任一步产生新代码、评审结论、回放结果、合并关系或新发现，都先把本文更新到 current 事实，再继续后续步骤；0 blocker／0 major只放行继续实施，不终止该更新循环。
+
+Responses 对比线按上节 `P0 → P1 → P2` 依序推进；它与下列 kernel partial-write、manager／cgroup 等既有运行态门分离。任一阶段只产生 scoped evidence，不改变完整产品 `UNVERIFIED`、部署 `NO_CUTOVER` 或 current Spec 的唯一规范地位。
 
 1. **读取current主线并保持历史canary边界**：current主线身份由`git rev-parse HEAD`读取，不在本文复制；token、response、item、tool与reasoning的旧提交／archive只界定各自历史scoped evidence，不因main前进而移动，也不覆盖2026-09-03 request-level effort。
 2. **确认当前实测层**：隔离`127.0.0.1:4142`真实启动取得readiness 200与32／10目录；正式`route_override=responses`下真实`gpt-5.3-codex` non-stream与stream均为HTTP 200，stream产生合法Anthropic SSE终态序列。旧Bun在成功窗口内身份快照不变且零signal，收口后`4142`零listener。
@@ -311,3 +425,4 @@ Main上的foundations、systemd runtime、happy、usage、semantic、route、blo
 | `localhost:4141` 的双运行时目标 | 当前 Bun 裸进程与未来 systemd socket 都可能成为 listener owner，直接启动会端口争用或误判新服务已接管 | Cutover 明确设置唯一 socket owner、旧 listener 释放、health 与 rollback gate；代码 review／unit smoke 不外推为运行态切换证据 |
 
 Current行为与验收只由[Spec](spec.md)和[Acceptance](acceptance.md)当前内容承担；旧`FINALIZED@4c9beed…`、`FINALIZED_ACCEPTANCE_ORACLE@f99492a…`与`main@c1de6bf…`均为历史内容／代码身份。真实forced ordinary tool roundtrip与单item project-v1 reasoning carrier echo继续只构成scoped PASS，不覆盖2026-09-03 request-level effort amendment或其它完整矩阵。整体保持`NO_CUTOVER`与产品`UNVERIFIED`，本文保持`LIVING`、不收口。
+- **2026-09-15 review follow-up**：fallback 配置已拒绝 resolved model key 与 effort value 的首尾空白；`_reasoning_effort` 已覆盖 Responses、Chat Completions、Command Code 与 Anthropic Messages 的显式 effort/`none`，并由新增 observation regression 锁定缺失字段与显式 `none` 的区别。等待第二轮独立评审确认文档与实现一致。

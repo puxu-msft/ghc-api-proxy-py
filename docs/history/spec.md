@@ -55,7 +55,9 @@ Captured entry 的 full transport envelope 可以包含：
 - credentials、Authorization、Cookie 和其他 transport-sensitive fields；
 - capture schema、digest、completeness 与 writer diagnostics。
 
-这使 captured History 和 raw capture 都属于敏感数据面。主程序不新增 app-level auth/RBAC；非 loopback 暴露的访问控制由部署层负责。普通 request log、metrics 和安全 observation 不得复制这些字段。
+这使 captured History 和 raw capture 都属于敏感数据面。普通 request log、metrics 和安全 observation 不得复制这些字段。
+
+对 History transport 读取，主程序提供最小的独立管理边界，而不是把 localhost 默认值误作访问控制：operator 必须配置 `server.history_export_token`（至少 16 个字符），调用方必须在 `X-History-Export-Token` header 中提供相同值。token 缺失、错误或服务未配置 token 时，credential-bearing transport/full export 必须在读取或确认 entry 存在之前以稳定的 `403 access_denied` 拒绝，且错误不得回显 token、capture 或 credential。该 token 是 secret；`/api/config` 的配置展示必须保持脱敏。外部监听时，operator 仍负责 TLS、网络隔离和该管理 secret 的轮换；bind host 从来不是这条授权合同的一部分。
 
 ## 4. Capture capability
 
@@ -63,13 +65,13 @@ History 保存 capture 总览和能力矩阵：
 
 - `capture_status`: `none | pending | complete | incomplete | corrupt`；
 - `client_request_available`；
-- `upstream_attempts[]`，每个 attempt 独立记录 request/response/boundary completeness；
+- `upstream_attempts[]`，每个 attempt 独立记录 `attempt_started`、request/response start、headers/body presence、response/attempt end completeness 与由该 matrix 导出的 `wire_diagnostic_eligible`；
 - `client_response_available`；
 - `wire_diagnostic_eligible`；
 - `semantic_replay_eligible`；
 - `live_replay_eligible`。
 
-`capture_status=complete` 不能替代能力矩阵。请求 body 完整但响应不完整的 capture 可以支持某些 semantic/live source，却不能伪装成完整 wire diagnostic。
+History handoff 在 RawCapture `finish()` 已等待全部 writer acknowledgements 后直接复制 immutable observation；History async writer 只持久化/读取该 safe matrix。字段缺失的既有 index row 必须投影为 false，且不得从 `UpstreamBodyAttempt`、timing 或 raw response 的存在猜测 true。`capture_status=complete` 不能替代能力矩阵。`none` 与 `corrupt` 是所有 replay mode 的状态否决；`pending`/`incomplete` 不得单独否决 semantic/live，后两种 mode 必须按完整 client request 与各自 capability 判断。请求 body 完整但响应不完整的 capture 可以支持某些 semantic/live source，却不能伪装成完整 wire diagnostic；wire 必须同时命中所选 attempt 的 `wire_diagnostic_eligible`。
 
 Capture writer 的 receipt 与 History writer 的 receipt 独立。History row 可以已经 durable，而 capture 仍为 pending/incomplete；capture complete 也不能反向修改 RequestFacts。
 
@@ -131,8 +133,9 @@ POST /history/api/entries/{id}/unpin
 - list 默认只返回非 archived entries；
 - detail 默认返回 metadata、semantic summary、capture capability 和 references；
 - `include=semantic` 才加载 semantic payload；
-- `include=transport` 才读取 cold full transport；
+- `include=transport` 才读取 cold full transport，且必须满足 `server.history_export_token` 与 `X-History-Export-Token` 的独立管理访问合同；
 - `export` 必须显式选择 `semantic`、`transport` 或 `full`；
+- `export=transport` 与 `export=full` 必须满足同一独立管理访问合同；`export=semantic`、list、detail 和 `include=semantic` 不要求该 header，继续是 credential-free 的普通 History projection；
 - transport/full projection 明确标记 `contains_credentials=true`；
 - replay result 不自动内嵌 source transport，只返回 provenance/reference；
 - captured History 的完整 transport 读取不等于普通 request log 读取。
@@ -165,5 +168,7 @@ active -> archiving -> archived
 
 | 日期 | 版本 | 变化 | 触发 |
 |---|---|---|---|
+| 2026-09-16 | v4 | 明确 History attachment/index 仅复制 writer-confirmed RawCapture per-attempt matrix；缺失历史字段 fail-closed，禁止 response-timing 推断 | replay review RCR-04 |
+| 2026-09-15 | v3 | 为 credential-bearing History transport/full export 新增 fail-closed 的 `server.history_export_token` + `X-History-Export-Token` 管理访问合同，明确 semantic/index projection 不受此 gate 限制，listener locality 不能替代授权 | 发现 host 可配置为外部地址，而 route 未单独保护 raw transport |
 | 2026-09-14 | v2 | 明确 History-owned identity metadata 与 raw transport identity/credentials 的边界，并把实现限制与长期 hardening 移到 status/deferred | 多轮文档 review 与当前实现对账 |
 | 2026-09-13 | v1 | 建立一 client request 一 entry、semantic projection、captured full transport、HistoryArchiveStore、capture capability、单向 archive、pin/retention 和独立 durability receipt 合同 | 可观测性、History、debug 重构 grill 达成 shared understanding |

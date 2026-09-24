@@ -17,7 +17,7 @@
 
 ## 当前限制
 
-- CLI 当前只暴露 wire diagnostic 参数；semantic/live 需要调用方注入 executor。
+- `app.replay` CLI 当前显式禁用，返回 `replay_cli_unavailable`；它不把调用方的 `--capture` 当作 source receipt 或直接读取的路径。现有 `HistoryWriter` 没有可供独立 CLI 安全组装的只读 source-authority seam，因此 CLI 不会绕过 History index/capability gate。semantic/live 仍需要调用方注入 executor。
 - `ReplayResult` 尚未完整记录 delivery、execution policy、cancel facts 和 result History reference。
 - Replay 不自动持久化新的 History entry；source transport 也不自动内嵌 result。
 

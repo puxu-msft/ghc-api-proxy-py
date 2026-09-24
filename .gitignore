@@ -2,3 +2,6 @@
 __pycache__/
 *.py[cod]
 .pytest_cache/
+
+# 工具运行时缓存（uv 锁、tiktoken 的 data-gym-cache 等），TMPDIR 指到这里时产生。
+/tmp/

@@ -1,0 +1,31 @@
+--- a/docs/.human-controlled/config.example.yaml
++++ b/docs/.human-controlled/config.example.yaml
+@@
+-    # 暴露在 `GET /models` 中的未禁用模型列表。只匹配上游 `model.id`。可以用 `/regex/` 写正则表达式。不设置则全部暴露，显式置空则全不暴露。
+-    exposed_models:
+-      # 等价于全部暴露
+-      - '/.*/'
+-
+@@
+   opencode_zen:
+     type: bridge
+-    # api_base_url:
+-
+-    # 从文件读取 X-API-Key。默认是 $XDG_DATA_HOME/ghc-api-proxy/sub2api_token-{key}.txt
+-    # 不支持热重载（需重启）。
+-    token_file: "$XDG_DATA_HOME/ghc-api-proxy/sub2api-sub2api_a.txt"
++    api_base_url: "https://opencode.ai/zen/v1"
++    api_key: "your-opencode-zen-api-key"
+ 
+-    # sub2api 上游会按需提供 wire format 支持，显式配置以启用。如配置为 URL 则不再根据 api_base_url 推导。
++    # 按需声明上游原生支持的 wire format；未声明的协议保持禁用。
+     openai_chat_completions_endpoint: true
+     openai_responses_endpoint: true
+-    # anthropic_messages_endpoint: true
++    anthropic_messages_endpoint: true
+@@
+-  # 是否保留消息中的 `reasoning.encrypted_content` 字段
+-  #   passthrough = 透传
+-  #   strip       = 剥离。如果剥离后 `reasoning` 块为空，则生成空的明文 `reasoning` 对象。
+-  #   strip_2     = 剥离。如果剥离后 `reasoning` 块为空，将其移除；如果因此消息为空，将其移除。
+-  reasoning_encrypted_content: passthrough

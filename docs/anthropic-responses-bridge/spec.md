@@ -13,6 +13,8 @@
   **范围限定，不要读宽**：本条只约束**本来就要发 SSE error event、且失败属于人写文档「业务可继续」那一类**的结局。上游停在块边界、按 2026-08-22 裁决以合成 stop reason 正常收尾的那一格**不报错**，因此不在第 30 行的触发条件内，行为不变；代理自我保护（`DeliveryError`）、客户端已断开、400／401／`refusal` 与本侧 bug 属该文第 5–11 行的「无法继续」，同样不咨询。**修订初稿把义务写成「凡发 SSE error event 之前」，比实现和人写文档都宽，会要求把明确不可继续的保护性错误也合成为续写；异源评审 2026-08-24 判为 major，已按此收窄。**
 - **2026-08-25 修订「Tools 与 tool choice」：客户端的 tool search 改为翻译，不再剥离。用户裁决，推翻 8-24 那条。** 两条针对的是不同的事——8-24 禁止代理**主动注入**（那部分仍有效，删掉的两个 legacy 开关不恢复），8-25 要求把**客户端已声明的**搜索翻到本腿。推翻旧条款的依据是一次读类型定义 + 看模型产出的实测：`ToolSearchToolParam.execution` 有 `"client"` 一档，语义与 Anthropic 侧的自定义 tool search 对应，完整往返实测跑通（`reports/260825-tool-search-translation-measurements.md`）。**8-24 暂缓映射的理由「Responses 的 tool_search 是 host 执行的、语义不等价」由此被证伪**——那个判断只看了「加上它请求变 200」，没读类型也没看 output items。同轮写下识别只有启发式（无协议判据，两个一线客户端硬编码了不同名字）与「认不出就不提升」的兜底，依据 `reports/260825-tool-search-translation-shapes.md`。
 - **2026-09-03 修订 request-level thinking／effort 双向合同：废除活翻译路径的 budget→effort 推导，以 `ThinkingEffortIntent` 同时承载启用状态与有效档位。** 触发是本轮实现审计确认显式 Anthropic `output_config.effort` 与 Responses `reasoning.effort` 两向都只落入 generic extension loss，而既有实现只从已废弃的 `thinking.budget_tokens` 猜档位；用户随后裁定：`thinking` 只决定是否启用 thinking effort，所有 effort level 只由 `output_config.effort` 决定，省略 `thinking` 视为启用，省略 Anthropic effort 取协议默认 `high`，禁用优先于任何显式档位。用户同时裁定逐消息 effort 折叠为当前生成的有效档位；反向 `none` 映射为 disabled，`minimal` 近似为 `low`；其余同名档按 catalog 对齐。
+- **2026-09-11 修订 wire-format reshape contract：三种 wire format 共用 typed semantic IR。** Anthropic Messages、OpenAI Responses 与 OpenAI Chat Completions 均必须通过 decode（wire → IR）与 encode（IR → wire）处理，包括同格式 round trip；不得保留 point-to-point conversion path。Request-side unrecognized fields 统一称 unknown fields，按 source scope 保留并只由显式规则投影；response-side unrecognized structures 进入 source-scoped opaque payloads，目标 codec 无法解释时跳过并记录 structured warning。Unknown response structure 不是 malformed：只有 malformed source、lifecycle 或 invariant failure 才拒绝；target 不支持的已知 response structure 也走 opaque／skip／warning，不得伪装成空 block 或正常 terminal。每个 codec stage 接收同一 request-lifetime immutable options snapshot；retry 默认复用 post-prepare target payload，只有 target-format change 才重新 decode/encode。`ContentBlock` 与 block-level `DeliveryUnit` 保持分离。同步更正 request unknown top-level field 矩阵：source-scoped unknown fields 先保留，只有显式 target projection 才进入 wire；未被目标 codec 认领的字段按 structured degradation 记录，不再按 malformed／lifecycle／invariant rejection 处理。
+- **2026-09-15 修订 bridge provider 的 reasoning capability 来源：catalog 优先，配置只补 catalog 缺口。** `OpenAICompatibleProvider` 必须读取 `capabilities.supports.reasoning_effort` 并投影到 resolved `ModelDescriptor`；当 bridge catalog 完全省略该字段时，`model_providers.<name>.reasoning_efforts` 可按 resolved model id 提供 operator capability assertion。catalog 明确发布的值（包括空列表）优先于配置 fallback，避免配置静默覆盖上游事实；该配置随 provider 实例固定，变更需要重启。没有 catalog 值也没有配置 assertion 时继续 fail closed，不猜模型名或默认 high。依据：2026-09-15 对实际 bridge 请求的红色回归，以及 provider catalog 缺少 reasoning capability 的生产观测。
   **Ultracode 边界**：调查 Claude Code 2.1.241 后确认 `ultracode` 不是 Anthropic Messages wire 的第六个 effort 值，而是客户端的 `xhigh` effort 加常驻动态 Workflow 编排；用户据此裁定本代理只翻译实际 wire 上的 `xhigh`，literal `ultracode` 作为非法 effort 拒绝，且不在代理侧模拟客户端 Workflow。实现依据见「Reasoning 与 signature 契约」的 request-level 小节；本次修订同步更新字段矩阵、验收行为与 `acceptance.md` 的 REQ-05A／REQ-05B。
   **2026-09-03 R2 target thinking profile 裁决**：官方 thinking 表是版本化权威快照而非永久常量，Copilot catalog 又没有完整发布 extended／disabled／always-on facts。用户裁定不在代码硬编码 model family 表；`model_translation.to_anthropic_messages.thinking_profiles` 是唯一来源，随包默认配置以 resolved-model 正则转录官方当前表，用户配置可覆盖。未命中 profile、always-on target收到disabled intent、extended-only target没有显式 manual budget、manual budget与请求`max_tokens`不相容时均fail closed；不得从effort档位或catalog budget limits猜出manual budget。
   **2026-09-03 R3 同 pattern override 语义纠正**：final whole-branch review确认本节的“直接替换该profile”与已批准计划、通用配置loader、部分override测试及本轮C6合同相反。该句是agent对配置层行为的错误转录，不是用户裁决；本次把它纠正为配置通用recursive deep merge：用户对同一pattern只写出的子字段覆盖bundled值，未点名子字段继续继承，mapping以外的值仍整体替换。触发报告为`reports/260903-review-effort-translation-final.md`；本修订同步更新本节与Acceptance REQ-05A，不改runtime配置行为。
@@ -119,7 +121,7 @@ Protocol leg 必须只在一个 route-policy 接缝按以下顺序决定；后�
 
 ## Request conversion 契约
 
-转换发生在每个 attempt 的 `PRE_SEND` 之后。approval、sanitize、thinking protection、tool preprocessing 与 retry strategy 继续操作 Anthropic canonical payload；禁止在 attempt loop 外只转换一次后复用陈旧 Responses payload。
+转换发生在每个 attempt 的 `PRE_SEND` 之后。approval、sanitize、thinking protection、tool preprocessing 与 retry strategy 继续操作 client 侧 canonical payload；随后由同一 request-lifetime immutable `TranslationOptions` snapshot 驱动 decode（当前 target wire → semantic IR）与 encode（semantic IR → 新 target wire）。没有 target-format change 的 retry 必须直接复用该 attempt 的 post-prepare target payload；只有显式 target-format change 才能从当前 post-prepare wire payload 重新 decode/encode，禁止删除它后从陈旧的 request-level semantic snapshot 重新生成。
 
 ### Envelope 与基础字段
 
@@ -138,14 +140,14 @@ Protocol leg 必须只在一个 route-policy 接缝按以下顺序决定；后�
 - assistant text 映射为 Responses assistant／output text item；不得与 tool call 折叠成 Chat Completions 形状。
 - assistant `tool_use` 映射为 Responses `function_call`，保留 `id→call_id`、name 与 JSON arguments；不得伪造具有不同语义的 Responses item id。
 - user `tool_result` 映射为 `function_call_output`，必须保留目标 call id、文本／结构内容与 error 状态。Responses 无法表达的 image／multimodal tool result 不得静默剥离。
-- unknown block／item 按矩阵固定`REJECT`并产生明确 incompatibility error；不能由 default branch静默 no-op或自行降级。
+- request-side unknown block／item 按矩阵固定`REJECT`并产生明确 incompatibility error；不能由 default branch静默 no-op或自行降级。Response-side unknown output structure 不拒绝整个已可交付 turn：先保留为 source-scoped opaque payload，再由不支持该结构的 target codec 跳过并记录 structured warning；malformed lifecycle 仍按 `REJECT` 处理。
 
 ### Tools 与 tool choice
 
 - Anthropic function tool declaration 映射为 Responses function tool，保留 name、description 与 `input_schema→parameters`。
 - tool declaration、历史 tool call、tool result、forced `tool_choice` 和响应 name restore 必须共享同一个双向 name mapping。开启 sanitization 后，所有引用必须原子地共同变换；禁止只改声明或只改 choice。
 - `auto`、`any`／required、`none` 与 named tool choice 必须映射到对应 Responses category。若目标声明被 capability policy 剥离或拒绝，关联 choice 必须同步处理，不得产生 dangling forced choice。
-- **Server-tool no-revive**：基础规格只支持 client-executed function tools。Anthropic 原生 server tools／typed tools（包括 web fetch、code execution 及未来 server-executed 类型）在 request capability gate 显式拒绝，不执行、不合成、不转成普通 function tool、不从 Responses server-tool result 合成 Anthropic 原生 block，也不触发专用降级 retry。若 upstream 在未请求时返回这类 item，response conversion 显式失败；已经提交 block 时按 post-commit partial failure 终止。任何白名单都是新的产品能力与单独用户裁决，不能通过扩充 converter 映射表暗中恢复。
+- **Server-tool no-revive**：基础规格只支持 client-executed function tools。Anthropic 原生 server tools／typed tools（包括 web fetch、code execution 及未来 server-executed 类型）在 request capability gate 显式拒绝，不执行、不合成、不转成普通 function tool、不从 Responses server-tool result 合成 Anthropic 原生 block，也不触发专用降级 retry。若 upstream 返回这类 response item，target codec 将其作为 source-scoped opaque payload 跳过并记录 structured warning；已经提交的合法 block 不因此回滚。任何白名单都是新的产品能力与单独用户裁决，不能通过扩充 converter 映射表暗中恢复。
   **两族已经由用户裁决移出本条**：web search 早已按 hosted 等价物映射（见 `hosted-web-search-spec.md`），tool search 自 2026-08-25 起按下一条翻译。本条约束的是**代理自行决定**去启用某种 server tool；客户端自己声明的东西不在此列。
 - **白名单只管 function tool。** 上面那张字段表是 `FunctionToolParam` 的；`tools[]` 里其它 union 成员（`web_search`、`mcp`、`custom`、`file_search` 等）各有自己的字段，**不得拿 function tool 的白名单去量它们**——实测那样会静默吃掉 `web_search.user_location`、`mcp.server_url` 与 `custom.format`。声明了本白名单不认领的 `type` 的条目原样通过，由认领该成员形状的那一层负责。
 - **Tool 声明按白名单重建，不按黑名单复制。** 出站 Responses function tool 只携带该 wire 承认的字段：`type`、`name`、`description`、`parameters`、`strict`、`allowed_callers`、`output_schema`（取自 openai SDK 3.3.1 的 `FunctionToolParam`）。客户端 tool 上的其余键一律不进 wire，并按 `DEGRADE` 记录字段路径。**这是结构性要求而不是逐字段修补**：黑名单式复制（「除了 `input_schema` 都带过去」）会把客户端此刻和将来放在 tool 上的任何键都送到一个从未同意过它的 endpoint，每一个都可能是下一个整请求 400，而且它们逐个到达、逐个才被发现。
@@ -189,7 +191,7 @@ Protocol leg 必须只在一个 route-policy 接缝按以下顺序决定；后�
 
 ## 双向字段处置矩阵
 
-处置状态的规范含义如下：`PRESERVE` 表示 wire 形状可变但语义值与顺序必须 byte-exact／value-exact 保留；`TRANSFORM` 表示存在本规格定义的确定映射；`REJECT` 表示在任何相关 downstream commit 前返回稳定 incompatibility error，commit 后则返回明确 partial failure；`DEGRADE` 表示请求可继续，但损失必须作为结构化 `ConversionFact` 进入 History、metrics 与 trace，且不得伪装成已保真。只有矩阵明确写为 `DEGRADE` 的项目才允许 permissive 处理；unknown 不自动继承 permissive。
+处置状态的规范含义如下：`PRESERVE` 表示 wire 形状可变但语义值与顺序必须 byte-exact／value-exact 保留；`TRANSFORM` 表示存在本规格定义的确定映射；`REJECT` 表示在任何相关 downstream commit 前返回稳定 incompatibility error，commit 后则返回明确 partial failure；`DEGRADE` 表示请求可继续，但损失必须作为结构化 `ConversionFact` 进入 History、metrics 与 trace，且不得伪装成已保真。Response-side unknown structure 是 source-scoped opaque payload：目标 codec 不支持时按 `DEGRADE` skip 并记录 structured warning，而不是 `REJECT`。只有 malformed source、lifecycle 或 invariant failure 进入 response-side `REJECT`。Request-side unknown 不自动继承 permissive，仍按各自矩阵处置。
 
 ### Anthropic request → Responses request
 
@@ -227,7 +229,7 @@ Protocol leg 必须只在一个 route-policy 接缝按以下顺序决定；后�
 | `top_k`、`stop_sequences`、`context_management` | `REJECT` | Responses 无冻结的等价语义；非空／非默认值不得忽略 |
 | request `metadata.user_id` 或明确 allowlist 项 | `TRANSFORM` | 映射到 Responses 对应 metadata／user 字段并保留 original metadata |
 | 其他 metadata | `DEGRADE` | 不发 upstream，记录字段路径；不得覆盖 original History metadata |
-| 未识别顶层字段 | `REJECT` | 默认 strict；Pydantic `extra=allow` 不得把它变成 silent drop |
+| 未识别顶层字段 | `PRESERVE`／`DEGRADE` | 按 source scope 保留在 semantic IR；同格式 round-trip 显式保留，跨格式仅按目标 codec 的显式 projection 写出，未被认领的字段不进 wire 并记录 structured loss。此处不涵盖 malformed source、lifecycle 或 invariant failure，它们仍按 `REJECT` 处理 |
 
 ### Responses request → Anthropic request
 
@@ -249,11 +251,12 @@ Protocol leg 必须只在一个 route-policy 接缝按以下顺序决定；后�
 | `message.output_text` | `TRANSFORM` | 形成 Anthropic text block |
 | refusal | `TRANSFORM`＋`DEGRADE` | 形成 text block并记录 `refusal` conversion fact；不得无标记伪装为普通成功文本 |
 | `function_call` | `TRANSFORM` | 形成 `tool_use`，value-exact 保留 `call_id`，恢复原 tool name并解析完整 arguments |
-| server-tool call／result | `REJECT` | 执行 no-revive；不得合成 Anthropic 原生 server block |
+| server-tool call／result | `DEGRADE` | 执行 no-revive；保留 source-scoped opaque payload，由 Anthropic target codec skip 并记录 structured warning；不得合成 Anthropic 原生 server block |
 | reasoning summary＋非空 `encrypted_content` | `TRANSFORM` | 每个 reasoning item 一对一形成 thinking block和本项目主 v1 carrier；不得跨 item 聚合／错配 |
 | encrypted-only reasoning | `TRANSFORM` | 普通模式下，非空 opaque payload 形成空 visible thinking 加本项目主 v1 carrier 的合法 thinking block，不得丢失 payload；显式 strip 是下方单独定义的有意去除政策 |
 | output item／event 的已知非语义 control metadata | `DEGRADE` | 不进入 Anthropic content，但记录 event type 与 provenance；只能用于明确列出的 control 类 |
-| 未知 output item、未知 content part、malformed lifecycle | `REJECT` | 不得由空 text block或正常 terminal 掩盖 |
+| 未知 output item、未知 content part | `DEGRADE` | 进入 source-scoped opaque payload；不支持的 target codec skip 并记录 structured warning，不得生成空 text block、拒绝 otherwise deliverable turn 或伪装成正常 terminal |
+| malformed source、malformed lifecycle、违反 assembler invariant | `REJECT` | 在错误边界处稳定失败；不得由空 text block或正常 terminal 掩盖 |
 | terminal status／incomplete reason／error | `TRANSFORM` | 按本规格 stop／error 合同映射；未知 reason 显式失败，不映射成 `end_turn` |
 | usage 与 details | `TRANSFORM` | 严格按 Usage 契约的冻结算式；reasoning 是 output 子集，不二次相加 |
 | upstream response id／model | `TRANSFORM`＋`PRESERVE` | 生成 Anthropic-compatible public id／model，同时在诊断 facts value-exact 保留 upstream id 与 resolved model |
@@ -301,6 +304,8 @@ Request-level thinking／effort 与 response reasoning item 是两类事实：�
 - **Anthropic effort 来源与优先级**：合法顶层 `output_config.effort` 是 `low／medium／high／xhigh／max`，省略时有效值为 Anthropic 默认 `high`。带 `mid-conversation-output-config-2026-07-01` beta 的 effort-only system message按消息顺序生效；对当前生成实际生效的最后一条覆盖顶层值，控制消息本身不进入 Responses prompt。Translator 必须读取路径转发策略清空前的源协议 header，仅用于验证 beta；该 header 仍不得转发给 Responses upstream。
 - **逐消息控制的合法形状与能力边界**：官方控制项必须是`role=system`、空content、且`output_config`只含合法effort，并带`mid-conversation-output-config-2026-07-01`；官方当前只为Fable／Mythos 5.1与Opus 5列明支持。Direct Anthropic leg原样转发并由目标model执行该capability gate；translated path按用户批准的bridge能力折叠控制，只要求Responses target明确发布可对齐effort，不把这一扩展表述为source Claude model官方支持。缺beta、非空content、错误role、未知sibling或非法effort均在upstream调用前拒绝。按消息顺序只把已位于某个user turn之前的最后一条控制应用到当前生成；末尾尚无后续user turn的合法控制项本轮不生效，从Responses prompt移除并只保留在original request／History，待下一轮客户端把它重放到后续user之前时再生效。普通system message不因本条被误认成effort控制。
 - **Anthropic → Responses**：disabled 优先于 intent 中的显式或默认档位。目标发布 `none` 时发 `reasoning.effort=none`；未发布 `none` 或 capability unknown 时零 upstream稳定拒绝，不得以最低档把disabled改成enabled。Enabled intent先从目标`reasoning_effort`集合排除`none`，再把有效档位对齐：精确支持则value-exact发送，不支持则取不强于请求档位的最强已发布档；没有向下档时取最弱已发布档并记录approximation；已知集合排除`none`后为空时稳定拒绝，不能把enabled翻成disabled；catalog缺席／原集合为空时不发并记录not-carried；只剩无法排序且不与请求值精确相等的名字时不发并记录not-carried。任何发送值都必须来自该resolved model公布的集合且不得为`none`。
+- **Bridge capability fallback**：对于 OpenAI-compatible bridge，`capabilities.supports.reasoning_effort` 是首选来源；若上游 catalog 完全省略该字段，provider 配置的 `reasoning_efforts` map 可为该 resolved model 补充能力集合。配置 map 不是全局默认，也不按客户端别名匹配；catalog 显式列表（包括空列表）优先。两者都缺失时保持 `reasoning-intent-not-carried`，不得凭模型名或端口默认档位。
+- **Capability discovery parity**：`/models?format=pi` 等向客户端报告能力的 surface 必须读取同一个 resolved `ModelDescriptor` snapshot，而不是重新解析 raw catalog；否则客户端发现的 `reasoning` 能力不得与实际 request translation 分叉。
 - **Responses → Anthropic**：`none`形成disabled；`minimal`形成enabled并先近似为`low`；`low／medium／high／xhigh／max`形成enabled与同名desired档；reasoning对象存在但effort缺席或为`null`时形成enabled、档位未指定的intent。Thinking wire先由`model_translation.to_anthropic_messages.thinking_profiles`的最后一个resolved-model fullmatch决定：disabled要求`can_disable`与effort上限成立；enabled按profile有序modes逐项选择首个可渲染shape；manual enabled缺budget或与本次`max_tokens`不相容时继续扫描后续adaptive，所有mode都不可渲染才拒绝。Profile unknown、always-on disabled或全profile不可渲染均稳定拒绝。Thinking shape确定后，有desired effort时再从目标catalog发布集合与Anthropic五档交集中选择：exact同名；否则取不强于desired的最强候选，取不到则取最弱候选，两者记approximation；catalog缺席／空、交集为空或只有不可排序名字时省略`output_config.effort`并记not-carried，但保留thinking shape。`minimal`自身的first-step近似即使随后exact命中`low`也必须留痕。Malformed／未知effort稳定拒绝。
 - **Ultracode**：Claude Code 的 `ultracode` 是客户端会话模式，实际 API effort 固定解析为 `xhigh`，另加不进入 Messages body 的 Workflow orchestration。Bridge 按普通 `xhigh` 翻译；literal `ultracode` 不是两侧 wire 的合法 effort，必须拒绝；代理不得通过扫描 prompt、注入 tool 或启动第二个 orchestrator 来模拟客户端 Workflow。
 - **兄弟字段与同格式重建**：reader 认领 `output_config.effort` 或 `reasoning.effort` 后，原对象其余成员不得随之消失；同格式 writer 重建完整对象，跨格式只对没有对应语义的精确子字段记 loss。已转换 effort 不得再被 generic extension loss 计为丢失。
@@ -366,7 +371,7 @@ Consumer 对每个 thinking block 固定按以下顺序分类，首个命中即�
 
 - Responses `message.output_text` 映射为 Anthropic text block；refusal 不能伪装成普通成功文本而不带 degradation／error 事实。
 - `function_call` 映射为 `tool_use`，保留 `call_id`、name 与 parsed input。
-- 任意 server-tool call／result执行 no-revive并显式失败；基础规格没有任何 server-tool 白名单。
+- 任意 server-tool call／result执行 no-revive并作为 opaque response skip；基础规格没有任何 server-tool 白名单。只有 malformed source、lifecycle 或 assembler invariant failure 显式失败。
 - 只要存在可执行 tool call，`stop_reason` 为 `tool_use`。
 - `incomplete` 且原因为 output-token limit 时，`stop_reason` 为 `max_tokens`。
 - completed 且无 tool call 时，`stop_reason` 为 `end_turn`。content filter、cancelled 与未知 incomplete reason 必须保留原因事实，不能仅映射成看似正常的 `end_turn` 后丢失 side-channel。
@@ -433,7 +438,7 @@ semantic block 固定等于一个 Anthropic content block，而不是 Responses 
 - refusal block：一个 refusal content part 映射为一个带 refusal degradation fact 的 Anthropic text block；完成条件与 text相同。
 - tool-use block：一个 `function_call` item 映射为一个 Anthropic `tool_use` block；仅当 name、`call_id` 与 authoritative complete arguments齐全，arguments 按基础 strict policy解析为合法 JSON value，且 item done到达后完成。解析失败即 conversion error，不生成空对象。
 - thinking block：一个 Responses reasoning item 映射为一个 Anthropic thinking block；只有该 item 的全部 summary parts、`encrypted_content`、item id 与 authoritative item done 已闭合，且本项目主 v1 carrier 已按双格式合同构造后完成。summary-only 与非空 encrypted-only 均仍是一 item一 block；空 `encrypted_content` 按项目主 v1 与 absent 相同。
-- server-tool call／result不构成可提交 block；它执行 no-revive并触发 incompatibility error。
+- server-tool call／result不构成可提交 block；它执行 no-revive，保留 source-scoped opaque payload，并由 target codec 记录 structured warning 后 skip。
 - terminal event本身不是 content block。它只能在 Responses 协议明确允许且 authoritative terminal body提供完整 final value时补足尚未收到单独 done的 text／refusal；不得补造缺失 tool name／call id／arguments、reasoning provenance或任何未知 item。
 
 一个 Responses item含多个可映射 content parts时，按 part语义顺序产生多个 Anthropic content blocks；多个 Responses items不得合并为一个 block。Block index按 source item首次合法出现及其 content-part次序冻结，只有最早未提交 block及其后连续已完成前缀可进入 sink。
@@ -494,7 +499,7 @@ semantic block 固定等于一个 Anthropic content block，而不是 Responses 
 - 在 downstream response commit 前，尽可能保留语义等价的 HTTP status、error type、message、code、request id 与 `retry-after`。
 - commit 后发生错误时，HTTP status 已不可更改；发送一个 Anthropic SSE error terminal，关闭 stream，History 标记 failed／aborted，且不发送成功 terminal。
 - prompt-limit error 必须保留可解析的 current／limit facts，供 Anthropic tokenization registry 学习。
-- unknown Responses output item、unknown terminal reason 或 malformed lifecycle sequence不得默认变成正常 `end_turn`。
+- unknown Responses output item 必须进入 source-scoped opaque payload，并由不支持它的 target codec skip + structured warning；不得生成空 text block、拒绝整个 otherwise deliverable turn，或把它掩盖成正常 `end_turn`。unknown terminal reason 与 malformed lifecycle sequence 仍不得默认变成正常 `end_turn`。
 - 错误转换本身失败时使用内部错误并保留原错误为 cause；不得吞掉两者。
 - 每个 upstream response／stream／WS connection 在成功、失败、retry、cancel 与 shutdown 路径上都必须关闭一次。
 
@@ -592,7 +597,7 @@ semantic block 固定等于一个 Anthropic content block，而不是 Responses 
 - route override若未来作为公共model suffix引入，必须先取得低概率扩展项中的用户裁决，再记录转义／literal model name规则与model mapping交互；其优先级和capability failure仍服从本规格冻结算法。
 - reasoning carrier 新 producer 固定使用本项目主 v1 version＋tag＋最小 payload；consumer 在其后兼容 `copilot-api-js` upstream v1 合法主路径与 legacy bare sentinel。Foreign、unknown version 与 malformed 均不恢复为 Responses `encrypted_content`；不得添加 HMAC、keyring、domain binding 或泛化安全系统。
 - Responses API新增event／item／usage字段时默认进入“unknown explicit”路径，不能因Pydantic extra allow而悄悄丢弃。
-- 基础compatibility policy固定strict；仅字段矩阵明确标为`DEGRADE`的cache／metadata／control facts以及 foreign／malformed reasoning carrier 兼容项允许继续，并必须向History／metrics暴露。Tools、reasoning、carrier、ordering与unknown项不得由全局permissive开关额外放宽。
+- 基础compatibility policy固定strict；仅字段矩阵明确标为`DEGRADE`的cache／metadata／control facts、foreign／malformed reasoning carrier 兼容项以及 response-side opaque unknowns 允许继续，并必须向History／metrics暴露。Request-side tools、reasoning、carrier、ordering与unknown项不得由全局permissive开关额外放宽。
 - generic upstream与Copilot upstream使用同一semantic contract；认证、base URL与request headers差异停留在transport adapter。
 
 ## 非功能要求
@@ -659,7 +664,7 @@ semantic block 固定等于一个 Anthropic content block，而不是 Responses 
 - **buffer overflow退化为live forwarding**：违反明确用户裁决，排除。
 - **磁盘 spill、专用大对象阈值或容量压力下 live forwarding**：与一般 memory-only／全局背压合同冲突，排除；普通 global budget、deadline 或 cancel 仍可产生对应明确终态。
 - **post-commit whole-generation retry**：无法保证no-dup，排除；安全continuation需独立契约与PoC。
-- **unknown item silent drop、malformed tool args变空对象、reasoning summary／ciphertext不对称聚合**：均制造不可见语义损失，排除。
+- **unknown item unrecorded silent drop、malformed tool args变空对象、reasoning summary／ciphertext不对称聚合**：均制造不可见语义损失，排除；显式 opaque／structured-warning skip 是规范允许的 response-side 处置。
 - **把 `copilot-api-js` v1 继续作为本项目唯一 producer 格式或逐 malformed 边界 oracle**：已被 2026-08-07 用户重裁覆盖；只保留其合法主路径 consumer compatibility，排除。
 
 ## 历史编写基线事实与证据
@@ -690,10 +695,14 @@ semantic block 固定等于一个 Anthropic content block，而不是 Responses 
 |---|---|---|---|---|
 | M1 | B2允许首block前暴露`message_start`并仍称可透明retry | **历史处置已被2026-08-22用户裁决部分覆盖；current见“Downstream Anthropic SSE”** | C | 原处置冻结首block前零HTTP success headers／零body；2026-08-22裁决改为第一次upstream 200即提交headers并允许首block前`ping`。未被覆盖的一半仍有效：首批将`message_start`与完整block同batch提交，首block前不得出现其它body event |
 | M2 | 双endpoint／vendor route precedence未冻结 | **采纳并关闭** | C | “冻结的route precedence”与真值表规定显式override优先、双支持默认Messages、Responses-only走Responses、unknown fail closed、不可用显式失败；transport fallback只有明确策略才存在 |
-| M3 | 缺preserve／transform／reject／degrade字段矩阵 | **采纳并关闭** | C | 新增双向矩阵、状态定义与四项低概率扩展；基础行为均已冻结，unknown不再留给实现者silent drop或任选strict／permissive |
+| M3 | 缺preserve／transform／reject／degrade字段矩阵 | **采纳并关闭** | C | 新增双向矩阵、状态定义与四项低概率扩展；request unknown按矩阵处置，response unknown固定opaque／skip／structured-warning，malformed source／lifecycle／invariant才拒绝，不再留给实现者silent drop或任选strict／permissive |
 | M4 | server-tool措辞可能恢复既有不支持能力 | **采纳并关闭** | C | Request tools、response matrix、block完成条件与排除方案共同冻结no-revive；任何白名单必须另行取得用户裁决 |
 | M5 | Usage reasoning与cache算式未冻结 | **采纳并关闭** | C | Usage契约定义`I=max(0,T-R-W)`、`output=O`、`Q⊆O`、total=`I+R+W+O`，并给四个数值向量；reasoning不得二次相加 |
 | M6 | Carrier缺wire grammar、domain绑定、完整性与迁移规则 | **旧认证信封处置撤销；按最新重裁重新关闭** | D4二次重裁 | 项目主 v1 现已冻结 namespace、version、tag、最小 payload、roundtrip、strip／echo 与 unknown／malformed 止血；明确不引入 JCS／HMAC／`kid`／domain binding／key rotation。`copilot-api-js` v1 降为合法主路径兼容输入，不再是本项目唯一 producer 格式或全 malformed 边界 oracle |
 | R2-M1 | 规格把过期基线与有损 carrier forward 实现误写成待回并的完成／合规证据 | **采纳并关闭文档缺陷；实现缺口保持开放** | C | 基线为 `ed77c9d191df81c451c25161420515cca52ce6a4`；Reasoning 双格式合同与“当前基线事实与证据”明确拆分 upstream compatibility primitive 已落地、项目主 v1 尚未落地和 forward cardinality 不合规。兼容 upstream carrier 不授权复制有损 non-stream／stream 聚合；一 item一 block、普通模式下非空 encrypted-only no-loss 与顺序合同不变 |
 | R3 | 定向复核 R2-M1 是否关闭，并核对旧规格是否忠实保留 upstream wire compatibility 与目标 forward 语义边界 | **历史终审有效；不覆盖本次新内容** | 独立终审 | `reports/260806-review-bridge-spec-r3.md` 对旧快照给出 blocker 0、major 0。2026-08-07 用户重裁改变 carrier 主格式与 malformed 范围后，该 verdict 不得沿用；当时状态因此改为 `READY_FOR_TARGETED_REREVIEW`，本次复评门由 D4-R2 定向评审关闭 |
 | D4-R2 | 用户最新裁决：采用本项目版本化主 carrier，同时兼容 upstream v1 主路径；不要求每个 malformed 边界一致，不复制有损聚合 | **采纳、冻结并经独立定向复评关闭** | 用户重裁＋独立定向复评 | “Reasoning 与 signature 契约”、双向字段矩阵、Compatibility、验收行为、结论共同冻结双格式 producer／consumer、识别顺序、主路径兼容、unknown／foreign／malformed 最小止血、strip／echo、一 item一 block与普通模式 encrypted-only no-loss。`reports/260807-review-spec-carrier-dual-format.md` 对 current Spec SHA-256 `0d81c21fb6efcc71e217b162418a89cf53cc7f392669e5b0b280651de512691e` 给出 0 blocker／0 major，复评门已关闭，Spec 恢复 `FINALIZED` 并可继续实施 |
+## 2026-09-15 review clarifications
+
+- `model_providers.<name>.reasoning_efforts` rejects leading or trailing whitespace in both resolved model keys and effort values. It does not normalize them, so a configuration typo fails at load time instead of silently missing the descriptor.
+- Provider-bound effort observation covers Responses `reasoning.effort`, Chat Completions `reasoning_effort`, Command Code `reasoning_effort`, and Anthropic `thinking` / `output_config.effort`. An explicit `none` remains distinct from an absent effort field in structured request records.

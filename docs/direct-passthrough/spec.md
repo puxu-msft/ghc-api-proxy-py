@@ -1,7 +1,7 @@
 # 直连路径：原生透传产品规格
 
 日期：2026-09-06
-状态：**DRAFT v24 — 待复评**。§3.1 的三处前置缺陷全部已合入 `main`（P1／P2 在 `7e96adc`，P3 在 `109dc44`），骨架亦已合入（`01c33f1`）。**Responses 直连腿已接线并合入 `main`**（`1fb37cd`，源提交存于 `archive/260901-passthrough-wiring`），issue #2／#3 关闭，**issue #4 的根因随同一次接线消除**（§6.2、§6.4；已污染的客户端历史由 §6.5 的 opt-in 修补处置，用户 2026-09-01 裁决）；**§10 的 Responses 直连 terminal status 与 typed client-action facts 分槽合同已覆盖 streaming 与 non-streaming**（streaming 由 `bb5783f` 实现，whole-body observation 随 `6200600` 的统一 provider observer 落地）；**Anthropic 直连腿的词汇已实现、未接线**（§2.8）。**直连 continuation 的共同 intent、streaming finalization、native failure 动作矩阵与 non-stream body 合同已经补入 §5.3／§9.2，尚未实现**；完整实施边界见 [`plan.md`](plan.md) §11。**Chat terminal-only buffered transaction、provider capability边界与provider observation合同已补入 §5.4／§9.3／§10，尚未实现**；获确认设计见 [`../direct-buffered-chat-completions/design.md`](../direct-buffered-chat-completions/design.md)。**§11 有一项待用户裁决**（响应头黑名单的定义域）；已污染的客户端历史那一项**用户已于 2026-09-01 裁决**，条款是 §6.5。
+状态：**DRAFT v29 — 待复评**。§3.1 的三处前置缺陷全部已合入 `main`（P1／P2 在 `7e96adc`，P3 在 `109dc44`），骨架亦已合入（`01c33f1`）。**Responses 直连腿已接线并合入 `main`**（`1fb37cd`，源提交存于 `archive/260901-passthrough-wiring`），issue #2／#3 关闭，**issue #4 的根因随同一次接线消除**（§6.2、§6.4；已污染的客户端历史由 §6.5 的 opt-in 修补处置，用户 2026-09-01 裁决）；**§6.5.6 定义了账号切换后连接绑定 reasoning state 的一次性恢复重试，并由 `hook_fix_responses_request.fix_401_item_id_not_belong_to_this_connection` 选择处置；失败 attempt 的 raw capture 也必须保留实际发出的 request 与 response body，落盘格式统一服从 [`../raw-capture/spec.md`](../raw-capture/spec.md)**；**§10 的 Responses 直连 terminal status 与 typed client-action facts 分槽合同已覆盖 streaming 与 non-streaming**（streaming 由 `bb5783f` 实现，whole-body observation 随 `6200600` 的统一 provider observer 落地）；**Anthropic 直连腿的词汇已实现、未接线**（§2.8）。**直连 continuation 的共同 intent、streaming finalization、native failure 动作矩阵与 non-stream body 合同已经补入 §5.3／§9.2，尚未实现**；完整实施边界见 [`plan.md`](plan.md) §11。**Chat terminal-only buffered transaction、provider capability边界与provider observation合同已补入 §5.4／§9.3／§10，尚未实现**；获确认设计见 [`../direct-buffered-chat-completions/design.md`](../direct-buffered-chat-completions/design.md)。**§11 有一项待用户裁决**（响应头黑名单的定义域）；已污染的客户端历史那一项**用户已于 2026-09-01 裁决**，条款是 §6.5。
 定义域：**任何 `route.translation_required is False` 的路由**，不限方言。v10 之前本规格只覆盖 `openai-responses` 两端；用户 2026-08-31 裁决「根因修复所有直连路径」，定义域随之放宽（§2.1）。
 
 > **目录随之从 `direct-responses-passthrough` 改名为 `direct-passthrough`。** v10 第一稿保留了旧名，理由是「改名会让报告里的引文指向不存在的路径」——那条理由用错了地方：路径重写会伪造的是**报告里的原句**，而同一条规则的另一半正是「文件搬了就把活文档的链接指过去」。目录名是活的，一个窄于内容的名字本身就是缺陷。已重指的是活文档与源码注释；**12 份评审报告内文里的旧绝对路径原样保留**，它们记录的是当时的位置，重写才是伪造。
@@ -504,6 +504,24 @@ Reason: Encrypted content item_id did not match the target item id.
 
 若将来确实想按命中数退役，那要先补一个能把上述四种缺席分开的计数来源（至少：启用状态、观察窗口内的请求量、累计命中数），本节在那之前不主张按计数判断。
 
+### 6.5.6 账号切换后：恢复连接绑定的 input item ID
+
+Copilot upstream 可以把 Responses input item 的 `id` 绑定到签发它的连接。用户切换账号后，客户端仍会带着旧会话的完整 `input` 重试；若新连接以 HTTP 401 和逐字短语 `input item ID does not belong to this connection` 拒绝，`hook_fix_responses_request.fix_401_item_id_not_belong_to_this_connection` 决定处置。
+
+| 配置值 | 行为 |
+|---|---|
+| `abandon` | 不重试，交还上游 401。 |
+| `strip_reasoning`（默认） | 重发一次，仅删除 `type == "reasoning"` 的顶层 `input` 对象元素的 `encrypted_content`。没有这种状态时交还原错误。 |
+| `strip_all` | 重发一次，删除全部顶层 `input` 对象元素的 `id`，并删除 reasoning 的 `encrypted_content`。没有可删字段时交还原错误。 |
+
+首次请求必须保持 native 原样转发。只有上述状态码和短语同时匹配时才可变换并重试；普通 401 一律沿用普通错误路径。恢复重试最多一次，不能进入通用 retry budget，也不能扩展到别的 provider 或 endpoint。
+
+只删顶层 item 的 `id`，不递归，不改 `call_id`、`previous_response_id`、`encrypted_content` 或任何其他字段。`id` 是上游已经明确拒绝的连接查找键；其余字段没有本次观测支持其属于同一故障，改动它们会把恢复扩大为猜测。
+
+这是对已失败请求的窄恢复，不是 native 首次请求的兼容整形，也不取代 §6.5 的显式 opt-in 历史修补。客户端可观察到的成功路径是第二次 upstream 请求的原始响应；两次都被拒绝时，客户端只得到第二次拒绝。
+
+启用 raw capture 时，首次 401 与恢复后 attempt 的实际 upstream request body、status 与 response body 都必须写入采集流。只保存入站 body 无法证明恢复实际删了什么，正是 v27 根因判断未被真实发送 body 约束的缺口。采集流的二进制格式、路径、配额、安全与完成诊断由 [`../raw-capture/spec.md`](../raw-capture/spec.md) 唯一定义；本节不另建 JSON 或其他落盘编码。
+
 ### 6.6 响应侧：把上游漂移的 id 稳定化（`hook_fix_responses_sse.fix_stream_ids`）
 
 **状态：合同已定并实现，默认关，显式 opt-in。** §6.2 已裁定这类变换必须另立显式、可选的 reshape 合同、不得叫它 native；2026-09-02 又在 Codex 因果假设被证伪后把默认值定为关。当前 `hook_fix_responses_sse.fix_stream_ids` 默认 `False`，`PassthroughFramer` 只在显式开启时调用 `stabilise_stream_ids`；本节不再有待用户裁的默认值。
@@ -866,6 +884,11 @@ v4 把更早挂在这里的产品分叉全部移入正文定案：header 合同 
 
 | 日期 | 条款 | 变化 | 触发 |
 |---|---|---|---|
+| 2026-09-08 | 文首、§6.5.6 | **v29。** raw capture 的落盘合同收敛到独立权威规格：只允许 RFC 8742 CBOR Sequence + zstd，不允许 JSONL 或长度前缀 JSON；本规格继续拥有“两个 account-switch attempt 必须采什么”的行为要求，但不再拥有文件编码 | 用户 2026-09-08 明确产品裁决 |
+| 2026-09-08 | 文首、§6.5.6 | **v28。** 真实请求的受控回放最终证伪“旧 item ID 是跨账号 401 的根因”：去 reasoning ID、function call ID、custom tool call ID、全部 54 个顶层 item ID 后仍为 401；只去 8 个 `reasoning.encrypted_content`、保留全部 item ID 则为 200。因此确认旧账号绑定状态是 reasoning 密文，默认 `strip_reasoning` 仅删除它，`strip_all` 再加 ID；同时要求 raw capture 记录失败 attempt 的实际 request／response body | 四份 38 万字节真实 401 body 的逐步剥离重放 |
+| 2026-09-08 | 文首、§6.5.6 | **v27。** 实测四份真实跨账号 401 body：逐一剥离后，去 reasoning ID、function call ID、custom tool call ID、全部 54 个顶层 item ID 均仍得到 401；只去 8 个 reasoning `encrypted_content`、保留全部 item ID 则得到 200。因此将 `strip_reasoning` 更正为默认剥离该密文状态，`strip_all` 在其上加全部顶层 item ID；`call_id` 保留 | 真实 raw capture 的受控重放 |
+| 2026-09-08 | 文首、§6.5.6 | **v26。** 用户裁决将连接绑定 ID 的恢复做成 `hook_fix_responses_request.fix_401_item_id_not_belong_to_this_connection`：`abandon` 交还错误；`strip_reasoning` 为默认，只剥离 reasoning ID；`strip_all` 才剥离全部顶层 input ID。首次请求仍逐字发送，普通 401 保持普通路径 | 用户 2026-09-08 裁决 |
+| 2026-09-08 | 文首、§6.5.6 | **v25。** 定义 Copilot Responses 连接绑定 input item ID 的窄恢复：用户切换账号后，旧会话历史在新连接上收到精确 401 `input item ID does not belong to this connection` 时，首次请求保留原样；仅该失败可重发一次，且只删除顶层 `input` 对象的 `id`。普通 401、非对象项与其余连接相关字段不变；不扩展到别的 provider 或 endpoint | 用户报告的 H1 401 与最小化 MockTransport 重现 |
 | 2026-09-06 | §2.6、§5.4、§8、§9.3、§10 | **v24。** 为direct Chat增加terminal-only buffered transaction：SSE success必须见 `[DONE]`，pre-terminal按统一ledger replay，post-terminal冻结语义并按裁定继续收raw tail；明确error carrier识别／冲突闭集、single-owner retry、candidate observation promotion与pre/post-terminal ending矩阵。Resolved model endpoint声明closed Chat capability，pipeline解释client／upstream mode与defaults，provider client不处理协议内容。Mode adaptation采用有完整字段表的标准multi-choice聚合，raw upstream exchange与synthetic client JSON分槽；最终Chat snapshot进入TUI与durable schema。当前CodeBuddy streaming-only capability标为P6未实测的保守compatibility | 用户2026-09-05～06对两个故障面、`[DONE]`、流内error、通用transaction、TUI、provider/capability边界、暂不运行P6、标准multi-choice与post-`[DONE]` tail的逐项裁决；[`../direct-buffered-chat-completions/decisions.md`](../direct-buffered-chat-completions/decisions.md)；两份独立设计评审 |
 | 2026-09-05 | 文首、§10 | **v23。** 修正 non-stream Responses observation 的实施状态：统一 provider observer 已在完整 body 翻译前读取 terminal status、usage 与 `output`，direct streaming／non-streaming 共用三态 classifier 和 terminal-output authority。同步明确 terminal 数组替代同 attempt 的早期 item drafts，非 object 元素保留为 `unknown` 而不伪装成 absent；这项修订不扩大 wire 行为，只使 Spec 与已合入实现和本次 merge 根因修复一致 | 远端 `6200600`；`tests/int/test_pipeline_app.py::test_a_direct_buffered_responses_reply_is_observed_before_translation`；`260905-merge-conflict-history-tests` 与独立合并复核 |
 | 2026-09-04 | 文首、§2.5、§2.6、§2.8、§5、§5.3、§6.3、§6.6、§7.2、§8、§9.2、§10 | **v22。** 把用户 2026-09-01 已裁的“直连与翻译块级交付路径原生 continuation”闭成可实施合同，并纠正本规格自行扩写的“每条直连腿”：当前 applicability 是能识别完整生成单位且能表达 executable synthetic call 的 Anthropic Messages 与 OpenAI Responses；Chat Completions 块级解析仍按既有裁决推迟，Embeddings 不适用。翻译／直连与 streaming／non-streaming 共用 `ContinuationDecision`，requested 才携带格式无关 intent；continuation 无次数预算，replay ledger 只决定 `REPLAY`。普通 failure 需要已交付或 held-and-about-to-commit 的完整单位，max-token 即使零完整单位也可 continuation；§7.2 为 `full`／未触发 `until-tool-use` 的 held group 补齐 final action。两种方言各自投影 synthetic call 与唯一终局；native failure 由 commit frontier、方言 taxonomy、replay ledger 与 decision 分为 replay／continuation／upstream ending／proxy failure／no-write；whole-body 两种方言分别定义 trigger 与 body 字段；native side facts 补齐 reasoning／tool／client-action 的共同摘要入口。当前 `signature_delta` reshape、D-6 failure adapter、D-7 message count 与 side facts 都进入 selector 启用及 D-5 对外完成边界，实施可按独立 semantic commits 拆分。两轮处置复核另修正：§6.3 的 upstream-native terminal 原样承诺只适用于 `EMIT_UPSTREAM_ENDING`，`EMIT_CONTINUATION` 是具名 synthetic-terminal 例外；non-stream Responses item 的位置由 `output` 数组索引表达，不写 event-level `output_index`；§2.5 的方言无关全称、§5 的“本腿无 continuation”及 §6.6 已定默认关却仍标待裁的 current-state 漂移一并更正 | [`reports/260903-next-root-fix-backlog-analysis.md`](reports/260903-next-root-fix-backlog-analysis.md)；[`reports/260903-next-root-fix-analysis-review-general-opus.md`](reports/260903-next-root-fix-analysis-review-general-opus.md)；[`reports/260903-next-root-fix-analysis-review-disposition.md`](reports/260903-next-root-fix-analysis-review-disposition.md)；[`260904-dotdev-dirty-inventory-disposition-recheck.md`](../dotdev-repository-repair/history/260904-dotdev-dirty-inventory-disposition-recheck.md)；[`260904-dotdev-merge-review-gpt-opus.md`](../dotdev-repository-repair/history/260904-dotdev-merge-review-gpt-opus.md) |

@@ -4,6 +4,8 @@
 
 **触发**：用户指令「添加配置项，可以选择：透传（不添加不剥离）、总是添加、总是剥离」——针对上游 Responses 请求的 `include: ["reasoning.encrypted_content"]`。
 
+2026-09-09 用户：已手工采纳，可删除本文档。
+
 ## 已实现的配置键
 
 `hook_fix_responses_request` 下新增（默认 `passthrough`，与既有行为逐字一致：翻译腿不发 `include`，原生 `/responses` 腿逐字转发客户端自己的 `include`）：

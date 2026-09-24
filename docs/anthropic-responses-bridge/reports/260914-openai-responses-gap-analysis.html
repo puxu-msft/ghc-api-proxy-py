@@ -1,0 +1,406 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>OpenAI Responses 能力与翻译路径差距报告</title>
+  <style>
+    :root {
+      color-scheme: light;
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      line-height: 1.6;
+      color: #24292f;
+      background: #f6f8fa;
+    }
+    body {
+      margin: 0;
+    }
+    main {
+      max-width: 1180px;
+      margin: 0 auto;
+      padding: 32px 24px 64px;
+      background: #fff;
+      min-height: 100vh;
+      box-sizing: border-box;
+    }
+    h1, h2, h3, h4 {
+      color: #1f2328;
+      line-height: 1.3;
+    }
+    h1 {
+      margin-top: 0;
+      font-size: 2rem;
+    }
+    h2 {
+      margin-top: 2.25rem;
+      padding-bottom: .35rem;
+      border-bottom: 1px solid #d0d7de;
+    }
+    h3 {
+      margin-top: 1.5rem;
+    }
+    code {
+      padding: .12em .3em;
+      border-radius: 4px;
+      background: #f6f8fa;
+      font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
+      font-size: .92em;
+    }
+    pre {
+      overflow-x: auto;
+      padding: 14px 16px;
+      border-radius: 6px;
+      background: #f6f8fa;
+      border: 1px solid #d8dee4;
+    }
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      margin: 1rem 0 1.5rem;
+      font-size: .94rem;
+    }
+    th, td {
+      padding: 9px 10px;
+      border: 1px solid #d0d7de;
+      vertical-align: top;
+      text-align: left;
+    }
+    th {
+      background: #f6f8fa;
+    }
+    .meta {
+      color: #57606a;
+    }
+    .priority {
+      padding: 12px 16px;
+      margin: 1rem 0;
+      border-left: 4px solid #0969da;
+      background: #ddf4ff;
+    }
+    .p0 {
+      border-left-color: #cf222e;
+      background: #ffebe9;
+    }
+    .p1 {
+      border-left-color: #9a6700;
+      background: #fff8c5;
+    }
+    .p2 {
+      border-left-color: #8250df;
+      background: #fbefff;
+    }
+    li {
+      margin: .35rem 0;
+    }
+    footer {
+      margin-top: 3rem;
+      padding-top: 1rem;
+      border-top: 1px solid #d0d7de;
+      color: #57606a;
+      font-size: .9rem;
+    }
+  </style>
+</head>
+<body>
+  <main>
+    <header>
+      <h1>OpenAI Responses 能力与翻译路径差距报告</h1>
+      <p class="meta">
+        主题：<code>anthropic-responses-bridge</code>；
+        日期：2026-09-14；
+        参考项目：<code>gim-home-ghc-tunnel</code>；
+        范围：OpenAI Responses 与 Anthropic Messages → Responses；
+        明确排除：OpenAI Chat Completions。
+      </p>
+    </header>
+
+    <section>
+      <h2>一、结论摘要</h2>
+      <p>
+        我们当前实现的主要路径已经比 gim 更重视 reasoning carrier、能力拒绝、
+        block-level buffering 和 Responses lifecycle；不应为了追随 gim 而退回到更宽松的
+        “未知内容直接丢弃或转文本”策略。
+      </p>
+      <p>
+        gim 最值得借鉴的是一份较清晰的 Responses 能力清单：路由与模型能力判定、
+        <code>service_tier</code>、compaction、图片和工具字段、web search/citation、
+        terminal 事件、错误映射以及真实 SSE 形状。我们的主要差距集中在负向行为、
+        malformed 输入的终态、usage 语义和真实上游事件证据，而不是基础 happy path。
+      </p>
+    </section>
+
+    <section>
+      <h2>二、范围与参考依据</h2>
+      <p>本报告只比较以下路径：</p>
+      <ul>
+        <li>OpenAI Responses HTTP 路由、请求/响应处理和流式事件。</li>
+        <li>Anthropic Messages → OpenAI Responses → Anthropic Messages 翻译。</li>
+        <li>模型 endpoint/capability 判定、工具、图片、reasoning、web search、usage 和错误终态。</li>
+      </ul>
+      <p>
+        不分析、不移植 gim 的 Chat Completions 支持。当前 gim 参考版本为本地工作树
+        HEAD <code>5ac6b721d10cbcd937acf4120e872405282b4b34</code>。
+      </p>
+    </section>
+
+    <section>
+      <h2>三、能力对比矩阵</h2>
+      <table>
+        <thead>
+          <tr>
+            <th>领域</th>
+            <th>gim 的实现特征</th>
+            <th>我们的实现状态</th>
+            <th>结论</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td>Responses 路由</td>
+            <td>
+              支持 <code>/responses</code> 和 <code>/v1/responses</code>；
+              按模型目录中的 <code>supported_endpoints</code> 选择。
+            </td>
+            <td>
+              有统一 pipeline routing，并对未知 capability fail-closed；
+              还区分直通、翻译和不同 driver。
+            </td>
+            <td>我们的 admission 方向更严格，继续保留。</td>
+          </tr>
+          <tr>
+            <td>请求透传</td>
+            <td>
+              大部分 Responses JSON 透传；强制 <code>service_tier: null</code>，
+              处理 <code>apply_patch</code>、image generation 和 compaction。
+            </td>
+            <td>
+              已有字段投影、extensions 和格式 driver，但仍需明确哪些字段是同格式透传、
+              哪些字段可跨 Anthropic 翻译。
+            </td>
+            <td>借鉴 gim 的清单，不复制其宽松边界。</td>
+          </tr>
+          <tr>
+            <td>Reasoning</td>
+            <td>
+              Responses 输出中的 reasoning item 不转换为 Anthropic thinking；
+              主要保留文本和工具调用。
+            </td>
+            <td>
+              有 reasoning proxy carrier，可承载 signature、redacted thinking、
+              summary 和 encrypted state。
+            </td>
+            <td>我们的设计更完整，属于核心差异，不能退化。</td>
+          </tr>
+          <tr>
+            <td>流式生命周期</td>
+            <td>
+              处理 output item、文本 delta、工具参数、search、citation 和 terminal 事件。
+            </td>
+            <td>
+              有较完整的 output-index 状态机和 block-level delivery，但部分 malformed
+              lifecycle 仍可能被降级为成功或静默丢弃。
+            </td>
+            <td>优先补负向状态机测试和严格终态。</td>
+          </tr>
+          <tr>
+            <td>工具与图片</td>
+            <td>
+              支持 function tool、tool result、URL/base64 图片；不支持项多数直接报错。
+            </td>
+            <td>
+              function tool 和图片主路径已有；非文本 tool result、vision admission、
+              图片限制和输出图片仍需明确。
+            </td>
+            <td>补齐 admission 和 loss 语义。</td>
+          </tr>
+          <tr>
+            <td>Web search</td>
+            <td>
+              Anthropic hosted search 映射为 Responses hosted search，保留 source URL、
+              citation 和可见搜索历史。
+            </td>
+            <td>
+              已有 hosted/client search 相关路径，但 domain restriction、max uses、
+              call ID、加密内容和 fallback 语义需要继续收紧。
+            </td>
+            <td>以安全保真为准，默认不能扩大搜索范围。</td>
+          </tr>
+          <tr>
+            <td>Usage</td>
+            <td>
+              Responses → Anthropic 会扣除 cached tokens，并映射 output/reasoning/cache 细节。
+            </td>
+            <td>
+              已有 usage 转换和上游 usage 保留，但 absent、zero、malformed 的语义尚未完全统一。
+            </td>
+            <td>区分缺失与非法，保持流式/非流式一致。</td>
+          </tr>
+        </tbody>
+      </table>
+    </section>
+
+    <section>
+      <h2>四、已确认的主要差距</h2>
+
+      <div class="priority p0">
+        <h3>P0：malformed Responses lifecycle 可能伪装成成功</h3>
+        <p>
+          当前某些非流式或流式异常形状可能被转换为空输出或正常
+          <code>end_turn</code>。需要拒绝或形成明确 conversion error/fact 的情况包括：
+        </p>
+        <ul>
+          <li>缺失或非法的 terminal/status。</li>
+          <li>非数组的 <code>output</code>。</li>
+          <li>重复 <code>output_item.added</code> 或重复 done。</li>
+          <li>未知 output index、done 无 draft、done 后继续 delta。</li>
+          <li>terminal 事件缺失或多个 terminal 互相冲突。</li>
+        </ul>
+        <p>
+          我们的 Spec 已经要求严格 lifecycle；实现应补齐统一 validator，而不是修改 Spec
+          去适应宽松行为。
+        </p>
+      </div>
+
+      <div class="priority p0">
+        <h3>P0：refusal 未形成完整的跨格式语义</h3>
+        <p>
+          Responses refusal content part 必须作为独立语义处理，不能落入 unknown/opaque
+          后被静默丢弃。非流式和流式都需要一致地产生可观察的 Anthropic 文本/拒绝结果，
+          并正确设置 stop reason 和 degradation fact。
+        </p>
+      </div>
+
+      <div class="priority p1">
+        <h3>P1：usage 缺失与 malformed 尚未严格区分</h3>
+        <p>
+          缺少 usage 可以采用明确的 estimated/zero 语义；usage 字段存在但类型错误、
+          负数、非有限数或结构不一致时，应产生明确的 invalid usage/conversion error，
+          不能简单吞掉并返回空 usage。
+        </p>
+      </div>
+
+      <div class="priority p1">
+        <h3>P1：reasoning item 截断判定未完全闭合</h3>
+        <p>
+          reasoning item 需要等待 summary parts、encrypted content、item identity
+          和 authoritative item done 全部闭合。尤其需要覆盖“前面已有完整 block，
+          最后一个 reasoning item 被截断”的流式和非流式场景。
+        </p>
+      </div>
+
+      <div class="priority p1">
+        <h3>P1：opaque 与 malformed 的边界需要收紧</h3>
+        <p>
+          真正未知但结构自洽的字段可以进入 opaque/extension；已知字段的错误类型、
+          lifecycle 错误、terminal 错误和协议不变量破坏不能全部伪装成未来扩展。
+        </p>
+      </div>
+
+      <div class="priority p1">
+        <h3>P1：图片、工具结果和 web search 的 loss 需要显式化</h3>
+        <ul>
+          <li>在翻译前根据模型 vision capability 做 admission。</li>
+          <li>明确 tool result 中图片或结构化 block 的保留、降级或拒绝策略。</li>
+          <li>web search 的 domain restriction 默认不能静默丢弃而扩大搜索范围。</li>
+          <li>明确 citation、加密网页内容、search call ID 和 max uses 的 loss。</li>
+          <li>stop reason 不可逆时记录可审计 loss，而不是静默改写。</li>
+        </ul>
+      </div>
+
+      <div class="priority p2">
+        <h3>P2：Responses 专属能力需要明确不做项</h3>
+        <p>
+          对以下能力应在能力矩阵中明确为“同格式可能透传、跨 Anthropic 翻译暂不支持”
+          或“明确拒绝”，而不是让它们依赖未知 item 的偶然处理：
+        </p>
+        <ul>
+          <li>background/asynchronous response。</li>
+          <li>previous response/conversation server-side state。</li>
+          <li>audio input/output。</li>
+          <li>annotations/citations 的完整跨格式转换。</li>
+          <li>image output、MCP、custom、file search、computer-use 等 server tools。</li>
+          <li>Responses WebSocket transport。</li>
+        </ul>
+      </div>
+    </section>
+
+    <section>
+      <h2>五、改进后的实施方案</h2>
+
+      <h3>P0：先修正可观察正确性</h3>
+      <ol>
+        <li>建立流式与非流式共享的 Responses lifecycle validator。</li>
+        <li>为 refusal 建立 typed semantic block 和双向转换。</li>
+        <li>区分 absent usage、zero usage 和 malformed usage。</li>
+        <li>完成 reasoning item 的 authoritative close/incomplete 判定。</li>
+        <li>保证错误不会伪装成成功的空消息或 <code>end_turn</code>。</li>
+      </ol>
+      <p>
+        每项都需要 paired non-stream/stream negative-control 测试，并保持现有
+        block-level buffering 和 reasoning carrier。
+      </p>
+
+      <h3>P1：补齐跨格式语义和 admission</h3>
+      <ol>
+        <li>补充图片 source、MIME、大小、数量和模型 vision capability 校验。</li>
+        <li>为非文本 tool result 定义稳定的 Responses 表达或明确拒绝。</li>
+        <li>收紧 web search domain restriction、citation 和 loss 记录。</li>
+        <li>统一 stop reason 的可逆映射和不可逆 loss 观测。</li>
+        <li>建立已知字段、未知扩展和 malformed source 的分类表。</li>
+      </ol>
+
+      <h3>P2：完成能力边界和证据矩阵</h3>
+      <ol>
+        <li>更新 Responses compatibility matrix，列出支持、降级、拒绝和同格式透传范围。</li>
+        <li>增加真实 upstream cassette：</li>
+      </ol>
+      <ul>
+        <li>真实 function call stream。</li>
+        <li><code>response.failed</code>、<code>response.cancelled</code> 和 error event。</li>
+        <li>refusal content part。</li>
+        <li>图片请求和 vision admission。</li>
+        <li>reasoning summary 截断。</li>
+        <li>web search citation 和 domain restriction。</li>
+      </ul>
+      <ol start="3">
+        <li>对同一异常输入验证流式与非流式的终态、usage、history 和错误投影一致。</li>
+        <li>明确暂不实现 Responses WebSocket，而不是保留模糊的半支持状态。</li>
+      </ol>
+    </section>
+
+    <section>
+      <h2>六、明确排除项</h2>
+      <ul>
+        <li>本报告不评估 gim 的 OpenAI Chat Completions 实现。</li>
+        <li>当前方案不复制 gim 的 Chat fallback 行为。</li>
+        <li>不会为了扩大表面兼容性而放宽当前 Spec 对 lifecycle、reasoning carrier 和 block-level delivery 的约束。</li>
+        <li>不会把 Responses 全量 API 支持误称为 Anthropic Messages 跨格式已支持。</li>
+      </ul>
+    </section>
+
+    <section>
+      <h2>七、主要代码依据</h2>
+      <ul>
+        <li><code>src/app/pipeline/routing.py</code>：模型 endpoint/capability 路由。</li>
+        <li><code>src/app/pipeline/translation_driver/openai_responses.py</code>：Anthropic→Responses 请求转换。</li>
+        <li><code>src/app/pipeline/translation_driver/responses.py</code>：Responses→Anthropic 语义转换。</li>
+        <li><code>src/app/pipeline/translation_driver/responses_items.py</code>：Responses item/content 分类。</li>
+        <li><code>src/app/pipeline/translation_driver/responses_terminal.py</code>：Responses terminal 处理。</li>
+        <li><code>src/app/pipeline/delivery/formats/openai_responses.py</code>：流式 Responses 事件状态机。</li>
+        <li><code>src/app/pipeline/translation_driver/usage.py</code>：usage 双向映射。</li>
+        <li><code>tests/unit/pipeline/delivery/test_openai_responses_format.py</code>：Responses stream framer 与生命周期测试。</li>
+        <li><code>tests/unit/pipeline/translation_driver/test_responses_semantics.py</code>：响应语义与终止状态测试。</li>
+        <li><code>tests/int/cassettes/</code>：已有 Responses/web-search 实际流量 cassette。</li>
+      </ul>
+    </section>
+
+    <footer>
+      <p>
+        本报告由当前仓库实现、现有 Spec/Acceptance、测试与
+        <code>gim-home-ghc-tunnel</code> 的 Responses 代码对比整理而成。
+        本次未修改生产代码、Spec 或测试。
+      </p>
+    </footer>
+  </main>
+</body>
+</html>

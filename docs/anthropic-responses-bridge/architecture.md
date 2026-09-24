@@ -129,7 +129,7 @@ Anthropic wire 只存在于入站/出站 adapter 和现有 hook compatibility vi
 
 ```mermaid
 flowchart LR
-    AR[Anthropic HTTP route] --> IA[Anthropic inbound adapter]
+    AR[Anthropic HTTP route] --> IA[Client-format decode adapter]
     IA --> D[Single request driver]
     D --> HP[Anthropic hook compatibility view]
     D --> RP[Route policy]
@@ -142,12 +142,12 @@ flowchart LR
     RC --> RT{Responses transport}
     RT --> RH[HTTP JSON/SSE]
     RT --> RW[WebSocket events]
-    MT --> PN[Protocol parser/normalizer]
+    MT -->     PN[Upstream parser/normalizer]
     RH --> PN
     RW --> PN
     PN --> BA[Semantic block assembler]
     BA --> BB[Per-block memory buffer + per-request buffer cap]
-    BB --> DR[Anthropic block renderer]
+    BB -->     DR[Client-format encode renderer]
     DR --> DS[Single downstream sink]
     DS --> CF[Envelope-aware monotonic delivery frontier]
     D --> FJ[Fact journal]
@@ -206,7 +206,7 @@ Action = (
 ```python
 RequestFacts(
     request_id,
-    inbound_protocol,
+    client_protocol,
     original_model,
     resolved_model,
     original_anthropic_request,
@@ -281,7 +281,7 @@ HistoryDurabilityReceipt(
 
 | Facts | Owner | 生命周期 | 更新语义 | Retry/fork/reset | 可见时点 |
 |---|---|---|---|---|---|
-| `RequestFacts` | inbound adapter＋driver | request-stable | approval 前 replace，批准后冻结 | 所有 attempt 共享；不得由 transport 修改 | request validated／approval accepted 后 |
+| `RequestFacts` | client-format decode adapter＋driver | request-stable | approval 前 replace，批准后冻结 | 所有 attempt 共享；不得由 upstream transport 修改 | request validated／approval accepted 后 |
 | `RouteFacts` | route policy 提议，driver 发布 effect | attempt-scoped decision | 每次 route action replace；reason append journal | transport fallback 新建 attempt fact，不覆写旧 attempt | route action accepted 后 |
 | `AttemptFacts` | driver | per-attempt | append-only summary，进行中字段由 driver 封口 | retry 新建，不复用旧 parser/assembler state | attempt start 后逐步可见，结束后冻结 |
 | `ConversionFacts` | converter | per-conversion | append warnings/losses；不可由 driver重解释 | 每个 attempt 独立；retry 重新转换 | conversion 正常完成或 typed failure 时 |

@@ -9,7 +9,9 @@
 
 ## 当前实现
 
-`model_providers` 的 provider 名参与 `provider/model` qualifier 解析。`default_model_provider` 决定没有 provider 限定时的归属；`fallback_model_provider` 处理显式写了未知 provider 的配置值。模型名映射仍由 `model_mappings` 承载，路由选择和目录展示共用 `app.pipeline.routing.route_table`。
+`model_providers` 的 provider 名参与 `provider/model` qualifier 解析。`default_model_provider` 同时决定没有 provider 限定时的归属，以及显式写了未知 provider 时的兜底归属。模型名映射仍由 `model_mappings` 承载，路由选择和目录展示共用 `app.pipeline.routing.route_table`。
+
+当前映射解析由 `app.pipeline.model_resolution.resolve_with_catalogs` 执行：裸请求先查裸 mapping 键，再查 default-provider 限定键；带 provider 的请求先查完整键，再查以 default provider 替换前缀的键。某个候选键一旦存在，目标不可用时只沿目标自身的 mapping 链继续，不能切换另一候选键或 passthrough；裸目标按来源 provider、default provider 查目录，全限定目标只查值中的 provider。mapping value 的 `@format` 会成为显式出站格式，最终无可用模型在路由阶段返回 400。
 
 模型目录候选包括所有 provider 的裸可用模型 ID、非 default provider 的 `provider/model` 限定 ID，以及 `model_mappings` 的键。裸 secondary ID 通常会按 default provider 解析而变成不可服务；限定 ID 才是无需额外 mapping 即可到达 secondary provider 的可发现名称。模型列表只返回 `serviceable == "yes"` 的条目，`owned_by` 是实际会处理该条目的 provider 名。
 
@@ -28,7 +30,7 @@
 
 `provider` 查询参数只作用于模型列表端点，不改变 `GET /models/{model}` 的单模型路由，也不为 Gemini 或 Azure 的 URL 路径模型参数增加新的 provider 语法。
 
-`docs/.human-controlled/` 的用户文档没有在本次整理中修改。`review-disposition.md` 与 `reports/` 保留为历史证据，旧的候选集推导只在其历史上下文中有效，不得覆盖当前 Spec。
+`docs/.human-controlled/config.example.yaml` 已由用户更新，明确 `default_model_provider` 同时承担默认与未知 provider 兜底；代码与本状态按该用户文档同步。`review-disposition.md` 与 `reports/` 保留为历史证据，旧的候选集推导只在其历史上下文中有效，不得覆盖当前 Spec。
 
 ## 验证入口
 

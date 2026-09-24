@@ -36,6 +36,11 @@
 | 2026-09-08 | **§3.3、§4.1、§4.2.1** | 补记 secondary provider 的可发现名称。非 default provider 的每个可用模型增加 `provider/model` 候选名；裸模型名仍参与候选计算，模型列表只返回 serviceable 条目，而 `routes` 保留诊断所需的非 serviceable 状态。旧文档曾断言 `/v1/models` 不会列出限定名，该断言已被 `52d57a09` 推翻 | 实现提交 `52d57a09` 及 `tests/int/test_pipeline_ops_routes.py` |
 | 2026-09-08 | **§4.1** | 明确三个模型列表入口的 `provider` 查询参数：按最终 `owned_by` 精确筛选，筛选发生在路由与 serviceability 判定之后；未提供时保持完整可路由列表，未知或空值返回空数据而不是改变 HTTP 状态 | 实现提交 `3b223e8e` 及 `tests/int/test_pipeline_ops_routes.py` |
 | 2026-09-08 | **§1.4** | 随包 `ghc` 只在配置文件、环境变量和 CLI 都未声明随包图中不存在的 provider 名时参与配置。任一高优先级层声明新 provider 名即移除随包 provider 图及其 `default_model_provider: ghc`，单个自定义 provider 仍由既有默认选择规则自动采用；仅覆盖现有 provider 字段仍正常合并 | 用户直接要求 |
+| 2026-09-08 | **§3、§3.1** | 请求名完整匹配 `model_mappings` 的键时，先按该映射选路，即使该键带已配置的 `provider/` 前缀；这让 `ttthree/deepseek-v4-flash-messages: ttthree-a/deepseek-v4-flash-messages` 能把请求转发给 `ttthree-a`。没有完整名映射时，保留请求侧前缀高于裸模型名映射的原规则 | 用户直接要求修复该配置 |
+| 2026-09-08 | **§3、§3.1** | 裸请求的原始模型名未命中时，再以 `default_model_provider/原始模型名` 查 mapping。因此同一条 `ttthree/deepseek-v4-flash-messages: ttthree-a/deepseek-v4-flash-messages` 也重定向裸 `deepseek-v4-flash-messages`；不要求重复书写裸键 | 用户直接纠正 |
+| 2026-09-08 | **§3、§3.1** | 带 provider 的请求若原始完整名未命中，先将前缀替换为 `fallback_model_provider` 再查 mapping；仅当该键也未命中时，才回到原有的显式 provider 路径 | 用户直接纠正 |
+| 2026-09-08 | **§2–§5** | 用户更新 `docs/.human-controlled/config.example.yaml`，将模型映射改为 catalog-aware 语义：mapping 键只在前一候选键未命中时继续尝试，目标不可用时只能沿目标自身的 mapping 链继续；裸目标按映射来源 provider、default provider 尝试，全限定目标只按目标 provider 尝试；mapping value 支持 `@format`；最终无可用模型返回 400，不再 passthrough。现行代码以 `resolve_with_catalogs` 为实现入口，覆盖本节下方 2026-08-27 discovery-only 条款 | 用户提交的配置文档变更 `1a31cda9` |
+| 2026-09-09 | **§1.2、§2、§4.2、§5.1、§5.3** | 用户裁定合并 `default_model_provider` 与 `fallback_model_provider`：只保留 `default_model_provider`，它同时负责无限定请求和未知 provider 的兜底；未知 provider 不再因缺少 fallback 配置而不可路由，`/api/status` 不再输出独立的 fallback 字段 | 用户直接裁定 |
 
 ## 修订记录
 
@@ -67,20 +72,16 @@ model_mappings:
 
 被否决的三个替代方案，以及否决理由，记在 §9.1。
 
-### 1.2 新增 `fallback_model_provider`
+### 1.2 `default_model_provider` 同时负责默认与兜底
 
-**用户裁决。** 顶层新键，与 `default_model_provider` 并列，语义**不同**：
+**用户裁决，2026-09-09。** 顶层只保留 `default_model_provider`。它同时承担两种角色：
 
-| 键 | 何时生效 |
+| 角色 | 何时生效 |
 |---|---|
-| `default_model_provider` | 解析全程**没有出现过**任何 provider 限定 |
-| `fallback_model_provider` | 出现了限定，但斜杠前那段**不是**已配置的 provider 名 |
+| 默认 provider | 解析全程没有出现 provider 限定，或请求本身没有 mapping 时 |
+| 兜底 provider | mapping 值或请求模型名中的 provider 前缀无法识别时 |
 
-「没写」和「写错了」是两件事，各占一个槽。合成一个槽会让「运维没配」和「运维配错了」在行为上不可区分，而后者需要被发现。
-
-`fallback_model_provider` **可以不配**。不配时，走到 §2 规则 2 的请求直接报错，见 §5.3。
-
-`fallback_model_provider` 若配置了一个 `model_providers` 里不存在的名字，**启动失败**——与 `default_model_provider` 今天的行为一致（`ProviderRegistry.__init__` 对 `default not in providers` 抛 `ProviderNotConfigured`）。**本次推导**，理由是两个键的失效后果同构，没有理由一个拦在启动、一个拖到运行时。
+`default_model_provider` 可以省略，单 provider 配置按既有规则自动采用该 provider；多个 provider 时必须明确指定。该 provider 名不存在时启动失败。不存在的 provider 限定不再因为缺少独立 fallback 配置而报错，而是交给这个默认 provider 处理。
 
 ### 1.3 计数腿的取值是 provider 名，校验相对配置而非静态枚举
 
@@ -121,6 +122,16 @@ model_mappings:
 配置文件、环境变量或 CLI 中任一高优先级层只要在 `model_providers` 下声明随包图中不存在的 provider 名，加载器就移除随包的整个 provider 图和随包默认名，再合并高优先级层。这样配置 `tenant` 不会得到意外的 `ghc`；若最终只有一个 provider，`resolve_default_name` 按既有规则自动采用它。配置多个 provider 时，operator 必须明确提供 `default_model_provider`。仅覆盖随包已有 provider 的字段，例如环境变量更新它的凭据，仍按普通逐键合并。
 
 ## 2. 解析规则
+
+**现行条款（2026-09-08）。** 以下规则以用户当前的 `docs/.human-controlled/config.example.yaml` 为准；本节下方标为历史的 2026-08-27 discovery-only 文本不再描述当前行为。
+
+1. **Mapping 键查找顺序。** 对裸请求 `model`，先查 `model`，只有该键不存在时才查 `default_model_provider/model`。对带 provider 的请求 `A/model`，先查完整的 `A/model`，只有该键不存在时才查 `default_model_provider/model`。一旦某个候选键存在，该键的目标链独占本次请求；目标链失败时不换查另一个候选键。
+2. **目标可用性。** Mapping 值是裸名时，按当前 mapping 来源显式 provider（如有）、再按 default provider 查 catalog。Mapping 值是全限定名时，只按值中的 provider 查 catalog。catalog 命中后保留上游目录的原始模型拼写。
+3. **目标链。** 目标没有命中 catalog、但目标自身存在 mapping 键时，继续解析该目标；每次跳转重新按本节第 2 条检查。没有可用目标时请求在路由阶段返回 400，禁止把原始请求名透传到 default provider。
+4. **直接请求。** 没有任何候选 mapping 键时，裸请求只查 default provider；带 provider 的请求查请求 provider，未知 provider 查 default provider。带 provider 的请求不会被裸 mapping 键改写。
+5. **格式后缀。** Mapping value 可以携带 `@format`。请求自身的 `@format` 优先于 mapping value；未知或没有对应 endpoint 的格式在路由阶段拒绝。
+
+## 历史版本：2026-08-27 discovery-only 解析规则（仅保留演进记录）
 
 **这是本 Spec 的核心条款。**
 
@@ -247,9 +258,13 @@ discovery pass 结束后得到 `(provider, model_name)`。此时才查该 provid
 
 **`docs/.human-controlled/config.example.yaml:100-102` 用用户自己的话描述了旧算法**（「若目标在可用模型列表中，直接解析命中；否则，当作别名再次尝试解析」），本次取代了它的第一句。那份文件不由本任务修改，改动写成候选材料，见 §11。
 
-## 3. 请求侧显式指定
+## 3. 请求侧显式指定（现行）
 
-**用户裁决。** 请求里的模型名支持 `provider/model` 前缀，**优先级最高**，覆盖配置路由。
+请求体中的 `provider/model` 前缀按 §2 的现行 mapping 查找顺序处理。只有完整请求名和 fallback-provider 替换名都没有 mapping 键时，前缀才直接限定 catalog provider；裸 mapping 键不会改写一个已经带 provider 的请求。`@format` 先从请求名尾部剥离，再处理 provider 前缀；mapping value 的 `@format` 由 §2 第 5 条处理。
+
+## 历史版本：2026-08-27 请求侧显式指定（仅保留演进记录）
+
+**用户裁决，2026-09-08 修订。** 请求里的模型名支持 `provider/model` 前缀。路由按以下顺序查 `model_mappings`：请求原始模型名；若请求没有 provider 前缀且前一步未命中，则 `default_model_provider/原始模型名`；若请求带 provider 前缀、前一步未命中且配置了 fallback，则 `fallback_model_provider/裸模型名`；最后才是既有的裸模型名别名链。任一前三步命中时，按该映射选路。若请求带 provider 前缀且前两次查找均没有匹配，才由请求侧前缀以最高优先级覆盖裸模型名别名链。
 
 ```
 POST /v1/messages  {"model": "A/claude-opus-5"}
@@ -261,13 +276,26 @@ POST /v1/messages  {"model": "A/claude-opus-5"}
 
 ### 3.1 前缀剥掉之后，模型名怎么解析
 
+先检查请求原始模型名是否命中 `model_mappings`。例如：
+
+```yaml
+model_mappings:
+  ttthree/deepseek-v4-flash-messages: ttthree-a/deepseek-v4-flash-messages
+```
+
+该条目命中时按 §2 的 discovery pass 读取其值，最终由 `ttthree-a` 服务 `deepseek-v4-flash-messages`。这是对一个已发布的 provider 限定模型名的配置性重定向；它比请求侧前缀优先。
+
+若请求为裸 `deepseek-v4-flash-messages`，且原始名没有条目，使用 `default_model_provider: ttthree` 合成同一个键 `ttthree/deepseek-v4-flash-messages` 再查一次。因此该配置同时重定向裸请求，无需重复写一条裸键。
+
+若请求带 provider 前缀，原始名未命中且配置 `fallback_model_provider: ttthree-a`，将其前缀替换后以 `ttthree-a/deepseek-v4-flash-messages` 再查一次。替换后的键命中时按其 mapping 路由；fallback 未配置或键未命中时，才剥掉请求前缀并按下面的规则解析裸模型名。
+
 首版这里只写了一句「不再进入 discovery pass，模型名部分仍需经过现有的 `model_mappings` 别名解析」，**那句话规定了一个必然失败的做法**，2026-08-27 规则评审 F-01 指出。现有的别名解析对值一无所知，会把 `A/claude-opus-5` 整串当模型名拿去查目录；而 §6.2 恰恰要求运维给每个别名各写一遍限定，于是这些值全都带斜杠、永远查不到，请求 `A/opus` 必然 `UnknownModel`——正好否掉这条语法存在的理由。
 
 正确的做法要三条规则，逐条钉死：
 
 1. **模型名部分仍走 §2.1 的 discovery pass**，不是走一个对限定无感的旧解析。也就是说链照跳，限定值照样在被读到时终止那条链。
 2. **链上读到的 provider 一律丢弃**。请求侧已经指名了 provider，链上任何限定都不能把它抢走。没有这一条，`A/opus` 遇上 `opus: B/claude-opus-5` 就会被送到 B，把「优先级最高」读反了。
-3. **链上出现规则 2 形态（限定认不出）时，`fallback_model_provider` 不参与**。provider 已由请求定死，fallback 是「没人指定 provider 时的补救」，此处没有需要补救的空位；那条限定退化成「只提供模型名」。
+3. **完成本节开头的 fallback 合成键查找后，链上出现规则 2 形态（限定认不出）时，`fallback_model_provider` 不参与**。provider 已由请求定死，fallback 是「没人指定 provider 时的补救」，此处没有需要补救的空位；那条限定退化成「只提供模型名」。
 
 于是 `A/opus` 在 `opus: A/claude-opus-5` 下解析为 provider=A、模型=`claude-opus-5`，与不带前缀的 `opus` 落到同一个地方——这正是首版想要而没写出来的性质。
 

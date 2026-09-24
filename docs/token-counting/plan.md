@@ -388,7 +388,7 @@ Task 3B只交付feature／state carrier和store mechanics，不实现candidate f
 - Store capacity只rollover causal current identity且仅在能释放pre-existing rows时；global零收益分支typed reject checkpoint、sample照常commit。Capacity transition只嵌套在RolledOver outcome，不是DriftObservation或standalone field。
 
 - [ ] Feature producer按每个input item独立accumulate visible／item4／nested4n／visual tri-state／prior，再与fixed context、components、whole known exact conservation；覆盖raw、non-object、message parts、reasoning、function output／media和unknown。
-- [ ] Prefix fingerprints改compact digest array；fixed context三位置、item五位置compact JSON；788-item motivating shape及limit-neighbor round-trip，wrong arity／type／framing／non-finite／length／aggregate corruption全部拒绝。
+- [ ] Prefix fingerprints改compact digest array；fixed context三位置、item五位置compact JSON；788-item motivating shape及1,048,576-byte limit-neighbor round-trip，wrong arity／type／framing／non-finite／length／aggregate corruption全部拒绝。
 - [ ] Store在policy entry后、codec前stamp committed order及checkpoint revisions；logical command required且NoChange无默认None。Replace／Delete expected prior revision提供transaction-fresh CAS，rollback原子。
 - [ ] Prefix checkpoint table保存canonical ProfileKey JSON PK、hash index、mode／evidence／revision，独立sample FK；eligible16／demoted8 carrier invariants和ProfileKey collision两row共存。
 - [ ] 实现4,096 per identity／epoch、32,768 global active checkpoint caps、inactive deterministic cleanup、zero-benefit typed reject、收益型current-identity rollover、drift＋NoChange precedence、cache／revision／event和termination semantics。

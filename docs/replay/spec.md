@@ -34,10 +34,12 @@ Replay process 负责 diagnostic/semantic/live execution。semantic/live 的实�
 - 没有 capture：`409 source_content_unavailable`；
 - capture 不可读或损坏：`409 source_evidence_unavailable`；
 - client request body 不可解析：semantic/live 不可运行；
-- attempt 的 request/response/boundary 不完整：对应 wire diagnostic 不可运行；
+- selected attempt 的 History per-attempt matrix 未同时证明 attempt/request/response start、headers/body presence、response end complete 和 attempt end complete：对应 wire diagnostic 不可运行；
 - response/client body 缺失时，不得生成“完整 wire replay”成功结果。
 
 `source_content_unavailable` 和 `source_evidence_unavailable` 是 not-started 结果，不创建伪成功 History entry。
+
+wire diagnostic 的放行只消费 source History receipt 中所选 attempt 的 fail-closed matrix；该 matrix 由 RawCapture 已确认的 per-attempt evidence 投影而来。读取 capture 时可以确认 source/selected attempt 可读存在，但不得重新从 response timing、`UpstreamBodyAttempt` 或零散 raw response events 推断 completeness。semantic/live 只消费各自 `client_request_available` 与 semantic/live capability，不要求 wire attempt 完整。
 
 ## 3. Modes
 
@@ -64,7 +66,7 @@ Replay process 负责 diagnostic/semantic/live execution。semantic/live 的实�
 
 - 必须有显式或配置的 deadline；
 - deadline 不得超过全局 `upstream_request_deadline`；
-- offline diagnostic 受独立 local read/CPU deadline；
+- deadline 在 source read 前建立；offline local read/decode/summary 与 semantic/live 的 request decode 必须在该预算内逐步检查，超时后停止继续处理且不得派生后台 replay；
 - client disconnect 取消执行；
 - HTTP 返回或取消后不得在后台继续执行；
 - 长结果可以流式返回，但必须在终局时生成新的 replay result/History provenance。
@@ -94,7 +96,7 @@ Replay 遇到 `function_call`、`custom_tool_call` 或其他 client action 时�
 - outcome/delivery/client actions；
 - result History entry/reference。
 
-Replay result 不默认内嵌 source full transport。当前 process result 携带 source/provenance、target、deadline/outcome 和 client actions；持久化为 History projection 由独立调用方显式提交，不自动覆盖 source entry。显式 evidence projection 才能读取完整 transport，并标记 `contains_credentials=true`。
+Replay result 不默认内嵌 source full transport。wire diagnostic 的默认 `diagnostic_records` 只允许包含 event type、attempt id、status code、completion state 与 body byte count 等 credential-free summary fields；不得包含 `body`、`headers` 或任何等价 raw payload 字段。semantic/live 的 default `output` 同样是显式 credential-free schema，只保留受限 outcome；client action 只保留 type/name，不得保留 arguments 或 opaque executor payload。当前 process result 携带 source/provenance、target、deadline/outcome、client actions 与上述安全 projection；持久化为 History projection 由独立调用方显式提交，不自动覆盖 source entry。若未来增加完整 evidence projection，必须是单独的显式敏感边界，标记 `contains_credentials=true`，不得混入默认 result。
 
 ## 7. Security boundary
 
@@ -104,6 +106,7 @@ Replay result 不默认内嵌 source full transport。当前 process result 携�
 
 | 日期 | 版本 | 变化 | 触发 |
 |---|---|---|---|
+| 2026-09-16 | v4 | wire diagnostic gate 改为只使用 source History receipt 的 selected per-attempt RawCapture matrix；明确 source reread 不得推断 completeness，semantic/live 保持 client-request-local gate | replay review RCR-04 |
 | 2026-09-14 | v3 | 将 ACTIVE contract 与当前 process/CLI 实现边界分层，明确 result delivery/cancel/History reference 与 CLI semantic/live exposure 仍属 deferred | 多轮文档 review 与当前实现对账 |
 | 2026-09-13 | v2 | 实现独立 `app.replay` process/CLI；capture-required source gate、explicit selector、wire offline diagnostic、注入式 semantic/live executor、target/deadline/cancel、client-action return-only 和 new replay provenance result | 七项实施切片 |
 | 2026-09-13 | v1 | 建立独立 replay process、capture-required source matrix、wire/semantic/live mode、explicit target、sync deadline/cancel、client-action boundary 和 provenance；标记 design-only | 可观测性、History、debug 重构 grill 达成 shared understanding |
