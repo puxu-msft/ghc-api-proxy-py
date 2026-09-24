@@ -196,9 +196,10 @@ Profile通过后才校验record与outer visible content的跨字段关系：
 - source 与 target 是同一 wire format时，provider 原生 opaque state原样通过，不使用项目 carrier。
 - 项目 carrier 所携带的原生 state只能恢复给 record type命名的目标格式。正常跨格式路径必须在translator内完成解包，使last-mile只看见provider原生fields。
 - `attempt.prepare`必须挂载一个对两种target都生效的resident carrier guard；它扫描当前attempt即将发送的target wire，并调用共享classifier识别所有非provider原生synthetic forms：本项目`ghc-api-proxy:synthetic-reasoning:`下的v1、v2、unknown version与malformed payload，以及兼容`copilot-api:synthetic-reasoning:v1`的payload prefix、bare prefix和legacy bare sentinel。不得只匹配项目prefix。
-- Guard若仍发现任一上述carrier，说明same-format direct path绕过了consumer、路由已换到无法消费其state的provider，或translator漏了解包。Guard在网络调用前返回稳定的`reasoning_carrier_not_unwrapped` translation error，保留字段路径和carrier分类但不记录完整payload。
-- `project_v2` 分类为合法只证明信封可解析，不证明它的原生state能移交给当前目标。尤其是carrier含Responses原生`encrypted_content`而目标模型没有Responses协议腿时，不能把密文当Anthropic signature、不能只保留可见summary伪装为无损请求；在没有已裁定的有损迁移合同前仍按上述规则拒绝。2026-09-23一次真实请求中，`sonnet`映射到仅开放Messages／Chat Completions的`claude-opus-5.5`，其历史有8个这种carrier；拒绝发生在任何upstream request之前。
-- Guard不负责猜测或恢复跨格式语义，也不把carrier原样送出。这样same-format direct path不需要临时构造`SemanticRequest.conversion` loss sink，也不会静默drop后继续一个已失去continuation的turn。
+- **2026-09-23 用户重裁，替代此前“凡到达guard均拒绝”的默认行为：** 已识别、合法且可恢复的项目／兼容carrier若包含不能写给目标Anthropic Messages upstream的原生state，默认**显式有损继续**。配置`model_translation.to_anthropic_messages.unportable_reasoning_carrier: refuse`改为无损拒绝；省略或设为`degrade`是默认有损档。该策略作用于direct与translated-to-Anthropic两条腿及retry／count的同一最终请求形状，不按某个别名、模型名或session特判。subscriber在组装chain时绑定该设置，变更需重启；reload不得报告已生效而继续用旧订阅者。
+- `degrade`对assistant历史中每个不可移植的thinking块删除**整个块**（包括其可见summary与加密state），保留同轮其它块及顺序；非assistant轮中的thinking不是合法历史reasoning，不以有损名义消解其错误。若因此留下空assistant `content: []`，保留该轮，不发明文本或签名。每处记`LossCode.REASONING_STATE_NOT_PORTABLE`及可定位路径（direct腿是本次`attempt.prepare`所读到的message/block位置，translated腿是typed message/block位置），纳入request级`conversion_losses`与安全请求日志，绝不记录原文、密文或签名，也绝不声称`lossless`。这是沿用当前跨格式writer对不可移植reasoning块的既有处置，不把内部summary伪装成普通assistant text。`refuse`则在发送前返回`reasoning_carrier_not_unwrapped`，原请求不被改写。不能因有损处置跳过后续的普通tool-pair、trailing-assistant及能力校验。
+- `project_v2`分类合法只证明信封可解析，不证明原生state能移交给当前目标。carrier含Responses原生`encrypted_content`而目标模型没有Responses协议腿时，不得把密文当Anthropic signature；2026-09-23真实请求中，`sonnet`映射到仅开放Messages／Chat Completions的`claude-opus-5.5`，历史有8个此类carrier，旧默认拒绝发生在任何upstream request之前。**对unknown version、malformed、unsupported record、direction／profile／presentation mismatch仍始终拒绝**，不得拿默认有损策略掩盖坏数据。
+- Guard只对已分类的合法不可移植carrier执行上述策略，不负责猜测或恢复别的跨格式语义，也不把任何项目carrier原样送出；处置后仍残留synthetic form时在网络调用前拒绝。same-format direct path也必须记录与跨格式writer同一语义的loss，不再以缺少`SemanticRequest.conversion`为由静默drop或一概拒绝。
 - 原生foreign state在正常cross-format translator中的既有`reasoning-state-not-portable`行为不变；不得借guard把native opaque误判成项目carrier，也不把可见summary降级为普通文本。
 
 ## 8. 分类与失败语义
@@ -330,6 +331,7 @@ translation driver、兼容helper、buffered response与streaming response必须
 
 ## 14. 修订记录
 
+- 2026-09-24，§7.3：用户明确重裁“默认显式有损，可配置为无损拒绝”，替代合法不可移植carrier原先一律fail-closed的默认；按现有跨格式writer的有损语义明确删除整个不能携带的thinking块、逐处记录`reasoning-state-not-portable`，严格档保持发送前拒绝，坏carrier仍拒绝。触发是已捕获的`sonnet → claude-opus-5.5`历史重复失败；这是用户新裁决，不是将漂移实现反写回Spec。
 - 2026-09-23，当前状态与§7.3澄清：纠正首页、§2及§13仍把已集成v2写成未集成／待实施的过时描述；依本次带规则的真实capture补明，合法`project_v2`承载Responses原生密文而目标无Responses腿时，不存在无损的Anthropic投影，末端拒绝符合既有opaque边界而非代理漏解包。此修订不批准丢弃历史state；当前请求证据见`reports/260923-cross-model-carrier-rejection.md`。
 - 2026-09-04，v1草案：依据用户本轮“使用两种协议的opaque槽搭建格式化内部结构、传递独有细节，并根因修复summary分段丢失”的指示，建立双向typed v2 envelope、结构化IR、统一路径和last-mile destack合同；取代历史v1的非通用限制及未落地的ordinal-only v2候选。
 - 2026-09-04，v2评审修订：采纳两份独立评审的全部findings，取消payload内layout omission，冻结outer-slot profiles与分类precedence，修正streaming字段为`summary_index`并补齐event authority，增加same-format resident guard与完整subscriber／streaming owner，裁定旧helper薄委托统一core，修正summary正控，并同步降格ordinal-only v2实验。处置 authority为`spec-review-disposition.md`。
