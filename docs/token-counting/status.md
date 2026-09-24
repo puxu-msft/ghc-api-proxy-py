@@ -4,6 +4,13 @@
 
 状态快照：2026-09-07，authority snapshot为[spec.md](spec.md) SHA-256 `fdf63872b906dc87ec44eb4627c199552cc904d730add186600cc5095c639df9`与[plan.md](plan.md) SHA-256 `bea5e7537f79a8242be48609e320481445599a317eb4fab38a29c9f2e450047a`；Task 4B-P authority correction、source、merged-state review和main-side gate均通过，reviewed source为`archive/260907-token-prefix-residuals → d10121c9`，main squash为`4fe53d0f`。
 
+## 2026-09-24 止血：learning store读取成本
+
+- **症状**：4,469 samples／233.5 MiB（其中prefix digest arrays 182 MiB——同一会话每轮都把整条前缀链再存一遍）时，一次whole-state read约22 s（decode占90%以上），startup 67.9 s，每个learning transaction读3～4次，count_tokens在每次commit后的reader refresh里等一次full read（2026-09-22 p50 18.8 s）；4141 RSS 1.95 GB。
+- **止血**（main `f4b41229`；[spec.md](spec.md) §8.2／§8.3／§8.5与2026-09-24修订记录）：sample caps降为256／512；只超出可剪枝caps的state不再是invalid，由writer在migration／sample／prune transaction中剪回；逐行decode按完整stored values复用；prune planner一次性计算victim keys。同一副本修复后startup 3.3 s、full read 0.35 s。
+- **上线须知**：首次以新caps启动的进程要把既有store剪到512个samples，按当前规模约1分钟且期间未ready；之后恢复秒级启动。
+- **仍待根治**：每个transaction仍读取全部retained rows（只是不再重复decode），caps因此不能再放宽；根治方向是validated state的增量维护、prefix chain不再逐sample全量持久化、writer自己commit后reader不再重读。
+
 ## 当前阶段
 
 Tasks 1～2保持稳定：living authority两路review均为0 blocker／0 major；Task 2 reviewed source `b7603cb6e98425728fc2a70a4e12f243b7e3333b`已归档到`archive/260907-token-features`并以main squash `5d5eb3d817d94cd706f9ac5908ce5dc6589fe599`集成，aggregate patch-id为`a0a14d9b674a244b9429b79c2171b46dfe8bf702`。
