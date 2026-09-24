@@ -24,7 +24,7 @@
 | 2026-08-24 | 范围、新增 §6、§2.5 | 纳入 `messages` 末尾角色：**上游拒收以 assistant 结尾的对话，而本代理自己的两处修复会把请求改成那样**。同时记下一次**反向**实测——官方文档说 Claude 5 一族移除了 `temperature`/`top_p`/`top_k`，经 Copilot 实测**不成立**，不要为它们建守卫 | 字段探针矩阵（§2.5），以及对本项目 `repair_tool_pairs` / `drop_blank_text_blocks` 的可达性实测 |
 | 2026-08-24 | §7.3 改写、§7.1 位置集合补全、§7.6～§7.8 新增 | **用户裁定 `passthrough` 字面成立**：白名单只在 `sanitize` / `disabled` 下运行，默认档一个字节都不动，因此默认配置面对 `scope` 仍会吃上游 400——那是被裁定的行为。首稿让白名单在每一档下都跑，论证是「四档管断点、本条管词汇表」，异源评审判为 blocker（「不要用当前 Spec 自己提出的解释代替裁决」），用户裁向字面一侧。同轮把位置集合从「三处」按官方 schema 补到七处（顶层与三处嵌套原先全漏），并把 `anthropic-beta` 的网关词汇表从待裁决条目升为正文条款 | 用户裁决 2026-08-24；异源评审 [reports/260824-cache-control-and-beta-implementation-review.md](reports/260824-cache-control-and-beta-implementation-review.md) CCBIR-01/02/03；跨模型实测（7 个 Claude 模型对 `scope` 全拒、对 `ttl` 全收，正控制全 200） |
 | 2026-08-24 | 标题、范围、新增 §7，原 §7～§9 顺延为 §8～§10 | 纳入 `cache_control` 的**子字段白名单**：客户端发的 `cache_control.scope` 让上游整条请求 400，而**补发对应的 beta 救不回来**（网关收下该 beta，后端 schema 却不认它启用的字段）。同时记下一条防止误读的实测——`defer_loading` 与 `tool_search_tool_regex_*` 上游**不带 beta 也收**，所以剥掉那个 beta flag 不会引发二次 400 | 线上 400（§7）、[reports/260824-cache-control-scope-and-gateway-beta-vocabulary.md](reports/260824-cache-control-scope-and-gateway-beta-vocabulary.md)（正控制 + 反向对照各跑两遍） |
-| 2026-09-24 | 新增 §6.6 | 实际已发出的 body 保留配对的末尾 user `tool_result`、其后跟一条 system 消息，上游仍曾返回 prefill 400；同样的尾部角色／配对形状也曾三次得到 200。此前 §6 只证明“代理删 user 后留下 assistant”的一类原因，不能反推每次 prefill 400 都由那一类产生；不扩大补 user 规则或擅自重试 400 | 真实 full-transport capture、三条同会话 200 对照和隔离 4142 合成探针；[调查报告](reports/260924-prefill-after-matched-tool-result.md) |
+| 2026-09-24 | 新增 §6.6 | 实际已发出的 body 保留配对的末尾 user `tool_result`、其后跟一条 system 消息，上游仍曾返回 prefill 400；同样的尾部角色／配对形状也曾三次得到 200。此前 §6 只证明“代理删 user 后留下 assistant”的一类原因，不能反推每次 prefill 400 都由那一类产生；不扩大补 user 规则或擅自重试 400。第二轮合成探针进一步排除只由消息轮数／工具数触发的简单阈值 | 真实 full-transport capture、三条同会话 200 对照和隔离 4142 两轮合成探针；[首轮报告](reports/260924-prefill-after-matched-tool-result.md)、[长历史对照](reports/260924-prefill-long-history-canary.md) |
 
 ## 0. 一句话
 
@@ -290,6 +290,8 @@ prefill 是 Anthropic 有文档的特性。客户端**故意**用它，是在要
 2026-09-23 `req=f5859c05` 的原始与实际发送的 `messages` 都以 `assistant(tool_use) → user(tool_result) → system(text)` 结束；`tool_use_id` 与最近一次调用匹配、tool result 非空，代理没有删除那个 user turn。`claude-opus-5.5` 上游仍返回 `This model does not support assistant message prefill`。同会话 `req=79983fc2`、`10f39bbc`、`a02209c4` 三次相近尾部形状且协议 flag、thinking 档、context-management 策略相同的请求均为 200。因此不能用错误文案反推“末尾 user 是代理删掉的”，也不能把 `system` 尾项或 `thinking → tool_use → thinking` 顺序单独定为必败原因。
 
 隔离 4142 的非敏感合成探针在四种最小形状中，单 user、user 后 system、tool result 后 system 都得 200；在最后一种后面再附 `Please continue.` 得另一种非 prefill 的 400。它没有复现线上错误，也不能为“遇到 400 就补一轮再试”提供正控。**现行 §6.1～§6.5 的触发谓词不变；本例尚无已证实可控根因。** 下一次真实复现可沿本轮 capture 的已匹配工具对、历史 thinking 和请求大小做隔离对照；改变用户已裁定的 400 不续写规则或客户端自写 prefill 不修规则之前必须另行裁决。
+
+同日第二轮在隔离 4142 发出非敏感合成历史，以同一目标模型、客户端侧提交相同 `anthropic-beta`、adaptive/high 与 `clear_thinking_20251015 keep=all` 模拟相邻的 23／26 消息、11／12 次配对工具调用，均得 200。这排除了“仅因消息或工具数到了这些值就报 prefill”的简单假设；合成历史没有原流量的原生 thinking signature、正文与真实 token 规模，也没有独立出站 header 捕获，故不能外推为原流量已被证明合法或已找到 upstream bug。详见[长历史对照](reports/260924-prefill-long-history-canary.md)。
 
 ## 7. 上游的词汇表：`cache_control` 子字段与 `anthropic-beta` flag
 
