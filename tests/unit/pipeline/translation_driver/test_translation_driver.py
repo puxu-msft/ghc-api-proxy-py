@@ -830,6 +830,113 @@ def test_equal_per_message_effort_still_records_per_message_provenance() -> None
 
 
 @pytest.mark.parametrize(
+    "beta",
+    [
+        "mid-conversation-output-config-2026-07-01",
+        "per-turn-control-2026-07-01",
+        "mid-conversation-effort-2026-08-01",
+        "per-message-effort-2026-07-01",
+    ],
+)
+def test_per_message_effort_accepts_deployed_beta_aliases(beta: str) -> None:
+    request = from_anthropic_messages(
+        {
+            "model": "m",
+            "messages": [
+                {
+                    "role": "system",
+                    "content": [],
+                    "output_config": {"effort": "xhigh"},
+                },
+            ],
+        },
+        source_headers={"anthropic-beta": beta},
+        translated=True,
+    )
+
+    assert request.thinking_effort == ThinkingEffortIntent(
+        enabled=True,
+        effort="xhigh",
+        effort_source=EffortSource.ANTHROPIC_PER_MESSAGE,
+    )
+    assert request.messages == []
+
+
+def test_content_bearing_per_turn_control_preserves_prompt_and_latest_effort() -> None:
+    request = from_anthropic_messages(
+        {
+            "model": "m",
+            "output_config": {"effort": "medium"},
+            "messages": [
+                {"role": "user", "content": "first"},
+                {
+                    "role": "system",
+                    "content": [
+                        {
+                            "type": "text",
+                            "text": "system reminder",
+                            "cache_control": {"type": "ephemeral"},
+                        }
+                    ],
+                    "output_config": {"effort": "high"},
+                },
+                {"role": "assistant", "content": "FIRST"},
+                {"role": "user", "content": "second"},
+                {
+                    "role": "system",
+                    "content": [],
+                    "output_config": {"effort": "xhigh"},
+                },
+            ],
+        },
+        source_headers={
+            "anthropic-beta": "mid-conversation-system-2026-04-07,per-turn-control-2026-07-01"
+        },
+        translated=True,
+    )
+
+    assert request.thinking_effort == ThinkingEffortIntent(
+        enabled=True,
+        effort="xhigh",
+        effort_source=EffortSource.ANTHROPIC_PER_MESSAGE,
+    )
+    assert [message.role for message in request.messages] == [
+        "user",
+        "system",
+        "assistant",
+        "user",
+    ]
+    assert request.messages[1].blocks[0].text == "system reminder"
+
+
+def test_empty_per_message_output_config_keeps_content_without_changing_effort() -> None:
+    request = from_anthropic_messages(
+        {
+            "model": "m",
+            "output_config": {"effort": "medium"},
+            "messages": [
+                {"role": "user", "content": "hi"},
+                {
+                    "role": "system",
+                    "content": "system reminder",
+                    "output_config": {},
+                },
+            ],
+        },
+        source_headers={"anthropic-beta": "per-turn-control-2026-07-01"},
+        translated=True,
+    )
+
+    assert request.thinking_effort == ThinkingEffortIntent(
+        enabled=True,
+        effort="medium",
+        effort_source=EffortSource.ANTHROPIC_TOP_LEVEL,
+    )
+    assert [message.role for message in request.messages] == ["user", "system"]
+    assert request.messages[1].blocks[0].text == "system reminder"
+
+
+@pytest.mark.parametrize(
     ("thinking", "enabled"),
     [
         ({"type": "adaptive"}, True),
@@ -966,16 +1073,6 @@ def test_invalid_anthropic_effort_is_refused_at_its_exact_field(
             {"anthropic-beta": "mid-conversation-output-config-2026-07-01"},
             "effort-control-invalid",
             "messages[0].role",
-        ),
-        (
-            {
-                "role": "system",
-                "content": "not empty",
-                "output_config": {"effort": "high"},
-            },
-            {"anthropic-beta": "mid-conversation-output-config-2026-07-01"},
-            "effort-control-invalid",
-            "messages[0].content",
         ),
         (
             {"role": "system", "content": "", "output_config": None},

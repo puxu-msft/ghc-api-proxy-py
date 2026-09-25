@@ -55,7 +55,14 @@ _PASSTHROUGH_KEYS = frozenset(
     }
 )
 
-EFFORT_BETA = "mid-conversation-output-config-2026-07-01"
+EFFORT_BETAS = frozenset(
+    {
+        "mid-conversation-output-config-2026-07-01",
+        "per-turn-control-2026-07-01",
+        "mid-conversation-effort-2026-08-01",
+        "per-message-effort-2026-07-01",
+    }
+)
 _CONTROL_MESSAGE_KEYS = frozenset({"role", "content", "output_config"})
 _CONTROL_OUTPUT_KEYS = frozenset({"effort"})
 
@@ -193,7 +200,7 @@ def _parse_effort_control(
     *,
     index: int,
     source_headers: Mapping[str, str],
-) -> str:
+) -> str | None:
     field = f"messages[{index}]"
     extra = raw.keys() - _CONTROL_MESSAGE_KEYS
     if extra:
@@ -210,12 +217,6 @@ def _parse_effort_control(
             field_path=f"{field}.role",
         )
     content = raw.get("content")
-    if content != "" and content != []:
-        raise TranslationRefused(
-            "effort control content must be empty",
-            code="effort-control-invalid",
-            field_path=f"{field}.content",
-        )
     output = raw.get("output_config")
     if not isinstance(output, Mapping):
         raise TranslationRefused(
@@ -232,14 +233,23 @@ def _parse_effort_control(
             code="effort-control-invalid",
             field_path=f"{field}.output_config.{key}",
         )
-    effort = output_fields.get("effort")
-    if not isinstance(effort, str) or effort not in ANTHROPIC_EFFORTS:
+    effort: str | None = None
+    if "effort" in output_fields:
+        candidate = output_fields["effort"]
+        if not isinstance(candidate, str) or candidate not in ANTHROPIC_EFFORTS:
+            raise TranslationRefused(
+                "invalid per-message effort",
+                code="effort-invalid",
+                field_path=f"{field}.output_config.effort",
+            )
+        effort = candidate
+    elif content in (None, "", []):
         raise TranslationRefused(
-            "invalid per-message effort",
+            "empty effort control requires an effort",
             code="effort-invalid",
             field_path=f"{field}.output_config.effort",
         )
-    if EFFORT_BETA not in _anthropic_beta_tokens(source_headers):
+    if not (_anthropic_beta_tokens(source_headers) & EFFORT_BETAS):
         raise TranslationRefused(
             "per-message effort requires its beta header",
             code="beta-required",
@@ -257,25 +267,24 @@ def _effective_per_message_effort(
 ) -> tuple[str, list[object], EffortSource]:
     active = baseline
     source = baseline_source
-    pending: str | None = None
     filtered: list[object] = []
     for index, raw in enumerate(messages):
         if _is_effort_control_candidate(raw):
-            pending = _parse_effort_control(
+            effort = _parse_effort_control(
                 cast(Mapping[str, Any], raw),
                 index=index,
                 source_headers=source_headers,
             )
+            content = cast(Mapping[str, Any], raw).get("content")
+            if content not in (None, "", []):
+                message = dict[str, Any](cast(Mapping[str, Any], raw))
+                message.pop("output_config", None)
+                filtered.append(message)
+            if effort is not None:
+                active = effort
+                source = EffortSource.ANTHROPIC_PER_MESSAGE
             continue
         filtered.append(raw)
-        if (
-            isinstance(raw, Mapping)
-            and cast(Mapping[str, Any], raw).get("role") == "user"
-            and pending is not None
-        ):
-            active = pending
-            source = EffortSource.ANTHROPIC_PER_MESSAGE
-            pending = None
     return active, filtered, source
 
 

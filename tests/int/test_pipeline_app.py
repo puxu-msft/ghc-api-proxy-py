@@ -7105,7 +7105,72 @@ def test_per_message_effort_overrides_top_level_and_is_not_prompt_content() -> N
 
 
 
-def test_future_only_effort_control_does_not_apply(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_claude_code_content_bearing_effort_control_is_preserved() -> None:
+    client, seen = make_client(lambda _: httpx2.Response(200, json={"id": "resp_1"}))
+    response = client.post(
+        "/v1/messages",
+        headers={
+            "anthropic-beta": "mid-conversation-system-2026-04-07,per-turn-control-2026-07-01"
+        },
+        json={
+            "model": "reasoning-full-model",
+            "output_config": {"effort": "xhigh"},
+            "messages": [
+                {"role": "user", "content": "first"},
+                {
+                    "role": "system",
+                    "content": [
+                        {
+                            "type": "text",
+                            "text": "system reminder",
+                            "cache_control": {"type": "ephemeral"},
+                        }
+                    ],
+                    "output_config": {"effort": "high"},
+                },
+                {"role": "assistant", "content": "FIRST"},
+                {"role": "user", "content": "second"},
+                {
+                    "role": "system",
+                    "content": [],
+                    "output_config": {"effort": "xhigh"},
+                },
+            ],
+        },
+    )
+
+    assert response.status_code == 200
+    assert len(seen) == 1
+    sent = cast(dict[str, Any], orjson.loads(seen[0].read()))
+    assert sent["reasoning"] == {"effort": "xhigh"}
+    assert sent["input"] == [
+        {
+            "type": "message",
+            "role": "user",
+            "content": [{"type": "input_text", "text": "first"}],
+        },
+        {
+            "type": "message",
+            "role": "system",
+            "content": [{"type": "input_text", "text": "system reminder"}],
+        },
+        {
+            "type": "message",
+            "role": "assistant",
+            "content": [{"type": "output_text", "text": "FIRST"}],
+        },
+        {
+            "type": "message",
+            "role": "user",
+            "content": [{"type": "input_text", "text": "second"}],
+        },
+    ]
+
+
+
+def test_trailing_effort_control_applies_to_current_generation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     contexts: list[RequestContext] = []
     real_build_context = inference_route.build_context
 
@@ -7137,7 +7202,7 @@ def test_future_only_effort_control_does_not_apply(monkeypatch: pytest.MonkeyPat
     assert response.status_code == 200
     assert len(seen) == 1
     sent = cast(dict[str, Any], orjson.loads(seen[0].read()))
-    assert sent["reasoning"] == {"effort": "medium"}
+    assert sent["reasoning"] == {"effort": "xhigh"}
     assert sent["input"] == [
         {
             "type": "message",
@@ -7166,12 +7231,13 @@ def test_future_only_effort_control_does_not_apply(monkeypatch: pytest.MonkeyPat
         (
             {
                 "role": "system",
-                "content": "not empty",
+                "content": "",
                 "output_config": {"effort": "high"},
+                "future": True,
             },
             {"anthropic-beta": "mid-conversation-output-config-2026-07-01"},
             "effort-control-invalid",
-            "messages[0].content",
+            "messages[0].future",
         ),
     ],
 )
